@@ -14,6 +14,14 @@ import { runMonteCarloSimulation } from '../lib/quant/monteCarlo';
 import { detectMarketRegime } from '../lib/quant/regimeDetector';
 import { simulateDigitalTwin } from '../lib/quant/digitalTwin';
 
+import { QuantFeatureEngine } from '../lib/quant/featureEngine';
+import { MarketStructureEngine } from '../lib/quant/marketStructureEngine';
+import { MultiTimeframeEngine } from '../lib/quant/multiTimeframeEngine';
+import { MarketRegimeEngine } from '../lib/quant/regimeEngine';
+import { SignalDecisionEngine } from '../lib/quant/signalDecisionEngine';
+import { ForecastEngine } from '../lib/quant/forecastEngine';
+import { SignalLifecycleEngine } from '../lib/quant/signalLifecycle';
+
 describe('1. Asset Metadata & Asset Classes', () => {
   it('correctly classifies BTCUSDT as CRYPTO with Binance exchange and WebSocket stream', () => {
     const meta = getAssetMetadata('BTCUSDT');
@@ -202,3 +210,244 @@ describe('6. Digital Twin PnL and Liquidation Math', () => {
     assert.ok(res.liquidationPrice > 50000);
   });
 });
+
+describe('7. QuantFeatureEngine Mathematical Precision', () => {
+  it('computes all mathematical features without NaN on authentic candles', async () => {
+    const candles = await marketService.getCandles('BTCUSDT', '1h', 60);
+    const feat = QuantFeatureEngine.extractFeatures(candles);
+    assert.ok(feat !== null, 'Features should not be null for 60 candles');
+
+    assert.ok(!isNaN(feat.price) && feat.price > 0, 'Price must be positive');
+    assert.ok(!isNaN(feat.atr14) && feat.atr14 > 0, 'ATR must be positive');
+    assert.ok(!isNaN(feat.atrPercent) && feat.atrPercent > 0, 'ATR% must be positive');
+    assert.ok(!isNaN(feat.ema20) && feat.ema20 > 0, 'EMA20 must be positive');
+    assert.ok(!isNaN(feat.ema50) && feat.ema50 > 0, 'EMA50 must be positive');
+    assert.ok(!isNaN(feat.rsi14) && feat.rsi14 >= 0 && feat.rsi14 <= 100, 'RSI must be in [0, 100]');
+    assert.ok(!isNaN(feat.macd.macdLine), 'MACD line must be valid');
+    assert.ok(!isNaN(feat.macd.histogram), 'MACD histogram must be valid');
+    assert.ok(!isNaN(feat.adx.adx14) && feat.adx.adx14 >= 0, 'ADX must be non-negative');
+    assert.ok(!isNaN(feat.bollinger.upper), 'Bollinger Upper must be valid');
+    assert.ok(!isNaN(feat.bollinger.bandwidth) && feat.bollinger.bandwidth >= 0, 'Bollinger bandwidth must be >= 0');
+    assert.ok(!isNaN(feat.realizedVolatility) && feat.realizedVolatility >= 0, 'Realized volatility must be >= 0');
+    assert.ok(!isNaN(feat.trendSlope), 'Trend slope must be valid');
+  });
+});
+
+describe('8. MarketStructureEngine Swing Extrema & Authentic S/R', () => {
+  it('identifies fractal swing points without arbitrary price multipliers', async () => {
+    const candles = await marketService.getCandles('BTCUSDT', '1h', 60);
+    const struct = MarketStructureEngine.analyze(candles);
+
+    assert.ok(['BULLISH_STRUCTURE', 'BEARISH_STRUCTURE', 'RANGE', 'BREAKOUT', 'BREAKDOWN', 'UNCERTAIN'].includes(struct.state));
+    assert.ok(struct.confidence >= 0 && struct.confidence <= 100);
+    assert.ok(struct.keySupport > 0, 'Key support must be positive');
+    assert.ok(struct.keyResistance > 0, 'Key resistance must be positive');
+    assert.ok(struct.keyResistance >= struct.keySupport, 'Resistance must be >= Support');
+  });
+
+  it('returns UNCERTAIN and 0 confidence on empty or sparse candles', () => {
+    const struct = MarketStructureEngine.analyze([]);
+    assert.equal(struct.state, 'UNCERTAIN');
+    assert.equal(struct.confidence, 0);
+  });
+});
+
+describe('9. MultiTimeframeEngine Alignment & Resampling', () => {
+  it('computes mathematically derived alignment percentage and hierarchy', async () => {
+    const candles = await marketService.getCandles('BTCUSDT', '1h', 60);
+    const mtf = MultiTimeframeEngine.analyze(candles, '1h');
+
+    assert.equal(mtf.anchorTimeframe, '1h');
+    assert.ok(mtf.rows.length >= 3, 'Should produce at least 3 hierarchy rows');
+    assert.ok(mtf.alignmentScore >= 0 && mtf.alignmentScore <= 100, 'Alignment score must be 0-100%');
+    assert.ok(['BULLISH', 'BEARISH', 'NEUTRAL'].includes(mtf.dominantBias));
+    assert.ok(mtf.totalWeight > 0, 'Total weight must be positive');
+  });
+
+  it('aggregates candles properly combining open, close, high, low, volume', () => {
+    const testCandles = [
+      { time: 100, open: 10, high: 15, low: 9, close: 12, volume: 100 },
+      { time: 200, open: 12, high: 18, low: 11, close: 16, volume: 150 },
+    ];
+    const agg = MultiTimeframeEngine.aggregateCandles(testCandles, 2);
+    assert.equal(agg.length, 1);
+    assert.equal(agg[0].open, 10);
+    assert.equal(agg[0].close, 16);
+    assert.equal(agg[0].high, 18);
+    assert.equal(agg[0].low, 9);
+    assert.equal(agg[0].volume, 250);
+  });
+});
+
+describe('10. MarketRegimeEngine Dynamic Classification', () => {
+  it('classifies market regime with dynamic confidence based on features', async () => {
+    const candles = await marketService.getCandles('BTCUSDT', '1h', 60);
+    const regime = MarketRegimeEngine.classify(candles);
+
+    assert.ok(['TRENDING_BULL', 'TRENDING_BEAR', 'RANGE', 'HIGH_VOLATILITY', 'LOW_VOLATILITY', 'BREAKOUT', 'BREAKDOWN', 'UNCERTAIN'].includes(regime.regime));
+    assert.ok(regime.confidence >= 0 && regime.confidence <= 100);
+    assert.ok(['LOW', 'MEDIUM', 'HIGH'].includes(regime.stability));
+    assert.ok(regime.transitionProbabilities.length > 0);
+  });
+});
+
+describe('11. SignalDecisionEngine Pipeline, Risk Gates & No-Setup', () => {
+  it('returns NO_SETUP when candles are insufficient (< 30)', () => {
+    const result = SignalDecisionEngine.evaluate([], 'BTCUSDT', '1h');
+    assert.equal(result.setupState, 'NO_SETUP');
+    assert.equal(result.direction, 'NEUTRAL');
+    assert.equal(result.setupQuality, 0);
+    assert.ok(result.rejectionReason?.includes('Недостаточно исторических свечей'));
+  });
+
+  it('returns NO_SETUP when market data is stale or offline (Gate 2)', async () => {
+    const candles = await marketService.getCandles('BTCUSDT', '1h', 50);
+    const result = SignalDecisionEngine.evaluate(candles, 'BTCUSDT', '1h', true, false);
+    assert.equal(result.setupState, 'NO_SETUP');
+    assert.equal(result.direction, 'NEUTRAL');
+    assert.ok(result.rejectionReason?.includes('OFFLINE'));
+  });
+
+  it('honors minimum R:R threshold and rejects bad R:R setups', async () => {
+    const candles = await marketService.getCandles('BTCUSDT', '1h', 50);
+    // Setting impossible R:R threshold of 10.0 guarantees rejection
+    const result = SignalDecisionEngine.evaluate(candles, 'BTCUSDT', '1h', true, true, 10.0);
+    assert.equal(result.setupState, 'NO_SETUP');
+    assert.equal(result.direction, 'NEUTRAL');
+  });
+
+  it('evaluates synthetic bullish series into LONG candidate with trade plan', () => {
+    const bullishCandles: Candle[] = [];
+    let price = 50000;
+    const now = Math.floor(Date.now() / 1000) - 70 * 3600;
+
+    for (let i = 0; i < 70; i++) {
+      const cycle = i % 10;
+      const isUp = cycle < 7;
+      const step = isUp ? 120 + (i % 3) * 20 : -70 - (i % 2) * 15;
+      const open = price;
+      const close = price + step;
+      bullishCandles.push({
+        time: now + i * 3600,
+        open,
+        high: Math.max(open, close) + 40,
+        low: Math.min(open, close) - 40,
+        close,
+        volume: isUp ? 6000 + i * 50 : 3500,
+      });
+      price = close;
+    }
+
+    const result = SignalDecisionEngine.evaluate(bullishCandles, 'TEST_ASSET', '1h', true, true, 1.2);
+    assert.equal(result.direction, 'LONG');
+    assert.ok(result.setupQuality >= 60, `Quality should be >= 60, got ${result.setupQuality}`);
+    assert.ok(result.tradePlan !== null);
+    assert.ok(result.tradePlan.takeProfit1 > result.tradePlan.entryPrice);
+    assert.ok(result.tradePlan.stopLoss < result.tradePlan.entryPrice);
+    assert.ok(result.evidence.some((e) => e.category === 'TREND'));
+  });
+
+  it('evaluates synthetic bearish series into SHORT candidate (separate symmetric logic)', () => {
+    const bearishCandles: Candle[] = [];
+    let price = 70000;
+    const now = Math.floor(Date.now() / 1000) - 70 * 3600;
+
+    for (let i = 0; i < 70; i++) {
+      const cycle = i % 10;
+      const isDown = cycle < 7;
+      const step = isDown ? -120 - (i % 3) * 20 : 70 + (i % 2) * 15;
+      const open = price;
+      const close = price + step;
+      bearishCandles.push({
+        time: now + i * 3600,
+        open,
+        high: Math.max(open, close) + 40,
+        low: Math.min(open, close) - 40,
+        close,
+        volume: isDown ? 6000 + i * 50 : 3500,
+      });
+      price = close;
+    }
+
+    const result = SignalDecisionEngine.evaluate(bearishCandles, 'TEST_BEAR', '1h', true, true, 1.2);
+    assert.equal(result.direction, 'SHORT');
+    assert.ok(result.setupQuality >= 60);
+    assert.ok(result.tradePlan !== null);
+    assert.ok(result.tradePlan.takeProfit1 < result.tradePlan.entryPrice);
+    assert.ok(result.tradePlan.stopLoss > result.tradePlan.entryPrice);
+  });
+});
+
+describe('12. ForecastEngine & Honest Scenarios', () => {
+  it('generates Brownian diffusion cone and honest scenario scores', async () => {
+    const candles = await marketService.getCandles('BTCUSDT', '1h', 50);
+    const forecast = ForecastEngine.generate(candles, 24);
+
+    assert.equal(forecast.isCalibrated, false);
+    assert.equal(forecast.cone.length, 25); // 0 + 24 horizons
+    assert.equal(forecast.scenarios.length, 3); // BULL, BASE, BEAR
+
+    const bull = forecast.scenarios.find((s) => s.id === 'BULL')!;
+    const bear = forecast.scenarios.find((s) => s.id === 'BEAR')!;
+    const base = forecast.scenarios.find((s) => s.id === 'BASE')!;
+
+    assert.ok(bull.targetPrice > forecast.currentPrice);
+    assert.ok(bear.targetPrice < forecast.currentPrice);
+    // Scores sum to 100
+    assert.equal(bull.scenarioScore + bear.scenarioScore + base.scenarioScore, 100);
+  });
+});
+
+describe('13. SignalLifecycleEngine Forward Testing & MFE/MAE', () => {
+  it('tracks WIN and TP2_HIT when forward price hits take profit', () => {
+    const signal: any = {
+      id: 'sig-test-1',
+      direction: 'LONG',
+      tradePlan: {
+        entryPrice: 50000,
+        stopLoss: 48000,
+        stopLossDistance: 2000,
+        takeProfit1: 53000,
+        takeProfit2: 55000,
+        riskRewardRatio: 2.5,
+      },
+    };
+
+    const forwardCandles = [
+      { time: 1000, open: 50000, high: 52000, low: 49500, close: 51500, volume: 100 },
+      { time: 2000, open: 51500, high: 53500, low: 51000, close: 53200, volume: 120 },
+      { time: 3000, open: 53200, high: 55500, low: 52800, close: 55100, volume: 140 },
+    ];
+
+    const outcome = SignalLifecycleEngine.evaluateOutcome(signal, forwardCandles);
+    assert.equal(outcome.status, 'WIN');
+    assert.equal(outcome.finalLifecycleState, 'TP2_HIT');
+    assert.ok(outcome.achievedRMultiple >= 2.5);
+    assert.ok(outcome.maxFavorableExcursionPct > 10);
+  });
+
+  it('tracks LOSS and SL_HIT when forward price drops to stop loss', () => {
+    const signal: any = {
+      id: 'sig-test-2',
+      direction: 'LONG',
+      tradePlan: {
+        entryPrice: 50000,
+        stopLoss: 48000,
+        stopLossDistance: 2000,
+        takeProfit1: 53000,
+        takeProfit2: 55000,
+        riskRewardRatio: 2.5,
+      },
+    };
+
+    const forwardCandles = [
+      { time: 1000, open: 50000, high: 50200, low: 47500, close: 47800, volume: 200 },
+    ];
+
+    const outcome = SignalLifecycleEngine.evaluateOutcome(signal, forwardCandles);
+    assert.equal(outcome.status, 'LOSS');
+    assert.equal(outcome.finalLifecycleState, 'SL_HIT');
+    assert.equal(outcome.achievedRMultiple, -1.0);
+  });
+});
+

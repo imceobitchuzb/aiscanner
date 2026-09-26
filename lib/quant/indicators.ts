@@ -108,7 +108,7 @@ export function calculateBollingerBands(closes: number[], period = 20, multiplie
     bandwidth.push(mean !== 0 ? ((up - low) / mean) * 100 : 0);
   }
 
-  return { sma, upper, lower, bandwidth };
+  return { sma, middle: sma, upper, lower, bandwidth };
 }
 
 export function calculateATR(candles: Candle[], period = 14): number[] {
@@ -145,15 +145,20 @@ export function calculateATR(candles: Candle[], period = 14): number[] {
 }
 
 export function calculateADX(candles: Candle[], period = 14) {
-  if (candles.length < period * 2) {
-    return { adx: candles.map(() => 20), plusDI: candles.map(() => 20), minusDI: candles.map(() => 20) };
+  const n = candles.length;
+  if (n < period * 2) {
+    return {
+      adx: new Array(n).fill(20),
+      plusDI: new Array(n).fill(20),
+      minusDI: new Array(n).fill(20),
+    };
   }
 
-  const tr: number[] = [];
-  const plusDM: number[] = [];
-  const minusDM: number[] = [];
+  const tr: number[] = [0];
+  const plusDM: number[] = [0];
+  const minusDM: number[] = [0];
 
-  for (let i = 1; i < candles.length; i++) {
+  for (let i = 1; i < n; i++) {
     const highDiff = candles[i].high - candles[i - 1].high;
     const lowDiff = candles[i - 1].low - candles[i].low;
 
@@ -166,15 +171,26 @@ export function calculateADX(candles: Candle[], period = 14) {
     tr.push(Math.max(highLow, highClose, lowClose));
   }
 
-  let trSmooth = tr.slice(0, period).reduce((a, b) => a + b, 0);
-  let plusDMSmooth = plusDM.slice(0, period).reduce((a, b) => a + b, 0);
-  let minusDMSmooth = minusDM.slice(0, period).reduce((a, b) => a + b, 0);
+  let trSmooth = 0;
+  let plusDMSmooth = 0;
+  let minusDMSmooth = 0;
+  for (let i = 1; i <= period; i++) {
+    trSmooth += tr[i];
+    plusDMSmooth += plusDM[i];
+    minusDMSmooth += minusDM[i];
+  }
 
-  const plusDI: number[] = [NaN];
-  const minusDI: number[] = [NaN];
-  const dx: number[] = [NaN];
+  const plusDI: number[] = new Array(period).fill(NaN);
+  const minusDI: number[] = new Array(period).fill(NaN);
+  const dx: number[] = new Array(period).fill(NaN);
 
-  for (let i = period; i < tr.length; i++) {
+  const initialPDI = (plusDMSmooth / (trSmooth || 1)) * 100;
+  const initialMDI = (minusDMSmooth / (trSmooth || 1)) * 100;
+  plusDI.push(initialPDI);
+  minusDI.push(initialMDI);
+  dx.push((Math.abs(initialPDI - initialMDI) / ((initialPDI + initialMDI) || 1)) * 100);
+
+  for (let i = period + 1; i < n; i++) {
     trSmooth = trSmooth - trSmooth / period + tr[i];
     plusDMSmooth = plusDMSmooth - plusDMSmooth / period + plusDM[i];
     minusDMSmooth = minusDMSmooth - minusDMSmooth / period + minusDM[i];
@@ -188,14 +204,22 @@ export function calculateADX(candles: Candle[], period = 14) {
     dx.push(currentDx);
   }
 
-  const validDx = dx.filter((v) => !isNaN(v));
-  let adxSmooth = validDx.slice(0, period).reduce((a, b) => a + b, 0) / period;
-  const adx: number[] = new Array(candles.length - validDx.length).fill(NaN);
+  const adx: number[] = new Array(period * 2 - 1).fill(NaN);
+  let dxSum = 0;
+  for (let i = period; i < period * 2; i++) {
+    dxSum += dx[i] || 0;
+  }
+  let adxSmooth = dxSum / period;
+  adx.push(adxSmooth);
 
-  for (let i = period; i < validDx.length; i++) {
-    adxSmooth = (adxSmooth * (period - 1) + validDx[i]) / period;
+  for (let i = period * 2; i < n; i++) {
+    adxSmooth = (adxSmooth * (period - 1) + (dx[i] || 0)) / period;
     adx.push(adxSmooth);
   }
+
+  while (adx.length < n) adx.push(adxSmooth || 20);
+  while (plusDI.length < n) plusDI.push(20);
+  while (minusDI.length < n) minusDI.push(20);
 
   return { adx, plusDI, minusDI };
 }

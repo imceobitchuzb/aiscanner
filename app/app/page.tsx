@@ -29,6 +29,7 @@ import { analyzeMultiTimeframe } from '@/lib/quant/multiTimeframe';
 import { generateProbabilisticForecast } from '@/lib/quant/probabilisticForecast';
 import { evaluateSignalQuality } from '@/lib/quant/signalScoring';
 import { findHistoricalAnalogs } from '@/lib/quant/analogMatcher';
+import { SignalDecisionEngine } from '@/lib/quant/signalDecisionEngine';
 import { RefreshCw, ShieldAlert } from 'lucide-react';
 
 export default function TerminalPage() {
@@ -170,6 +171,17 @@ export default function TerminalPage() {
   const { signal, quality } = evaluateSignalQuality(candles, regime, structure, mtf);
   const analogs = findHistoricalAnalogs(candles, currentSymbol);
 
+  // Phase 2: Central Deterministic Signal Decision Pipeline
+  const isMarketOpen = marketStatus === 'OPEN' || marketStatus === 'PRE_MARKET' || marketStatus === 'POST_MARKET';
+  const isDataLive = freshness === 'LIVE' || freshness === 'RECENT';
+  const unifiedSignal = SignalDecisionEngine.evaluate(
+    candles,
+    currentSymbol,
+    timeframe,
+    isMarketOpen,
+    isDataLive
+  );
+
   return (
     <div className="min-h-screen bg-[#06080F] text-slate-100 flex flex-col font-sans">
       {/* Top Header */}
@@ -225,7 +237,12 @@ export default function TerminalPage() {
 
           {/* Signal & Quality Row: AI Signal | Quality Meter | Historical Analogs */}
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-            <SignalCard signal={signal} />
+            <SignalCard
+              signal={signal}
+              unifiedSignal={unifiedSignal}
+              dataSource={dataSource}
+              dataFreshness={freshness}
+            />
             <SignalQualityMeter quality={quality} />
             <HistoricalAnalogs analogs={analogs} />
           </div>

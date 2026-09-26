@@ -67,8 +67,8 @@ export class CryptoMarketDataProvider implements IMarketDataProvider {
       const spreadPercent = lastPrice > 0 ? (spread / lastPrice) * 100 : 0;
 
       const nowSec = Math.floor(Date.now() / 1000);
-      const ageSec = Math.max(0, nowSec - closeTimeSec);
-      const freshness: FreshnessState = ageSec <= 5 ? 'LIVE' : ageSec <= 30 ? 'RECENT' : ageSec <= 120 ? 'STALE' : 'OFFLINE';
+      // Robust freshness: successfully received live response with low latency
+      const freshness: FreshnessState = latencyMs < 2500 ? 'LIVE' : latencyMs < 10000 ? 'RECENT' : 'STALE';
 
       this.lastPing = new Date().toISOString();
 
