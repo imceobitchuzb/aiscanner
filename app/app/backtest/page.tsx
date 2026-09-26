@@ -1,363 +1,508 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Header } from '@/components/terminal/Header';
-import { DEFAULT_ASSETS, DemoMarketDataProvider } from '@/lib/providers/demoProvider';
-import { BacktestReport, BacktestStrategyConfig, Candle, MonteCarloSimulationResult, Timeframe, WalkForwardResult } from '@/lib/types';
-import { runBacktest } from '@/lib/quant/backtestEngine';
-import { runMonteCarloSimulation } from '@/lib/quant/monteCarlo';
-import { runWalkForwardAnalysis } from '@/lib/quant/walkForward';
+import { ASSET_CATALOG } from '@/lib/market/assetMetadata';
+import { DEFAULT_ASSETS } from '@/lib/providers/demoProvider';
+import { Timeframe } from '@/lib/market/types';
 import { 
   Activity, 
+  AlertTriangle, 
   BarChart3, 
   CheckCircle2, 
-  Cpu, 
   Dices, 
+  Download, 
   Layers, 
+  LineChart, 
   Play, 
   RefreshCw, 
-  ShieldCheck, 
+  Scale, 
+  ShieldAlert, 
   SlidersHorizontal, 
-  TrendingUp 
+  TrendingDown, 
+  TrendingUp, 
+  Zap 
 } from 'lucide-react';
 
-export default function BacktestLabPage() {
-  const [symbol, setSymbol] = useState<string>('BTCUSDT');
+export default function BacktestPage() {
+  const [asset, setAsset] = useState<string>('BTCUSDT');
   const [timeframe, setTimeframe] = useState<Timeframe>('1h');
-  const [initialCapital, setInitialCapital] = useState<number>(10000);
-  const [riskPerTrade, setRiskPerTrade] = useState<number>(2.0);
-  const [useEmaCross, setUseEmaCross] = useState<boolean>(true);
-  const [useRsiFilter, setUseRsiFilter] = useState<boolean>(true);
-  const [running, setRunning] = useState<boolean>(false);
+  const [candleLimit, setCandleLimit] = useState<number>(300);
+  const [initialBalance, setInitialBalance] = useState<number>(10000);
+  const [riskPerTrade, setRiskPerTrade] = useState<number>(1.0);
+  const [feesBps, setFeesBps] = useState<number>(5);
+  const [slippageBps, setSlippageBps] = useState<number>(3);
+  const [collisionRule, setCollisionRule] = useState<'SL_FIRST' | 'TP_FIRST'>('SL_FIRST');
+  const [minRiskReward, setMinRiskReward] = useState<number>(1.5);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [result, setResult] = useState<any>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const [report, setReport] = useState<BacktestReport | null>(null);
-  const [monteCarlo, setMonteCarlo] = useState<MonteCarloSimulationResult | null>(null);
-  const [walkForward, setWalkForward] = useState<WalkForwardResult | null>(null);
+  const runHistoricalTest = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/backtest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          asset,
+          timeframe,
+          limit: candleLimit,
+          initialBalance,
+          riskPerTradePercent: riskPerTrade,
+          feesBps,
+          slippageBps,
+          collisionRule,
+          minRiskReward,
+        }),
+      });
 
-  const executeBacktest = async () => {
-    setRunning(true);
-    const provider = new DemoMarketDataProvider();
-    const candles = await provider.getCandles(symbol, timeframe, 300);
-
-    const config: BacktestStrategyConfig = {
-      name: 'Dynamic Momentum & Moving Average Engine',
-      symbol,
-      timeframe,
-      initialBalance: initialCapital,
-      riskPerTradePercent: riskPerTrade,
-      stopLossAtrMultiplier: 1.5,
-      takeProfitAtrMultiplier: 2.5,
-      indicators: {
-        useEmaCross,
-        useRsiFilter,
-        useStructureBreakout: true,
-        useVolumeExpansion: true,
-      },
-    };
-
-    const rep = runBacktest(candles, config);
-    const mc = runMonteCarloSimulation(rep.trades, initialCapital, 1000, 60);
-    const wf = runWalkForwardAnalysis(candles, config, 0.7);
-
-    setReport(rep);
-    setMonteCarlo(mc);
-    setWalkForward(wf);
-    setRunning(false);
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.message || `HTTP error ${res.status}`);
+      }
+      setResult(data);
+    } catch (err: any) {
+      setError(err.message || 'Ошибка запуска исторического тестирования.');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  useEffect(() => {
-    executeBacktest();
-  }, [symbol, timeframe]);
+  const replay = result?.replay;
+  const walkForward = result?.walkForward;
+  const monteCarlo = result?.monteCarlo;
+  const sensitivity = result?.sensitivity;
+  const calibration = result?.calibration;
 
   return (
-    <div className="min-h-screen bg-[#06080F] text-slate-100 flex flex-col font-sans">
+    <div className="min-h-screen bg-[#06090e] text-[#e1e7ec] flex flex-col font-mono text-xs">
       <Header
-        currentSymbol={symbol}
-        onSelectSymbol={setSymbol}
+        currentSymbol={asset}
+        onSelectSymbol={(sym) => setAsset(sym)}
         watchlist={DEFAULT_ASSETS}
         isLiveFeed={true}
       />
 
-      <main className="flex-1 p-4 md:p-6 max-w-7xl mx-auto w-full space-y-4">
-        {/* Title */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between pb-3 border-b border-[#162032] gap-3">
+      <main className="flex-1 p-4 md:p-6 space-y-6 max-w-7xl mx-auto w-full">
+        {/* Top Title Banner */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-[#1b2533] pb-4">
           <div>
-            <div className="flex items-center gap-2">
-              <BarChart3 className="h-5 w-5 text-indigo-400" />
-              <h1 className="text-lg font-bold text-slate-100 uppercase tracking-wider">
-                Quantitative Strategy Laboratory &amp; Backtesting Engine
-              </h1>
+            <div className="flex items-center gap-2 text-cyan-400 font-bold text-base tracking-wider uppercase">
+              <Scale className="w-5 h-5" />
+              <span>Historical Replay & Quant Verification Engine</span>
             </div>
-            <p className="text-xs text-slate-400 mt-0.5">
-              Vectorized event simulation, Walk-Forward overfitting diagnostic, and 1,000-iteration Monte Carlo bootstrap.
+            <p className="text-[#8899a6] text-xs mt-1">
+              Последовательное воспроизведение рынка свеча-за-свечой без заглядывания в будущее (Zero Look-Ahead Bias). Строго на реальных котировках.
             </p>
           </div>
 
           <button
-            onClick={executeBacktest}
-            disabled={running}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs shadow-ai-glow transition-all"
+            onClick={runHistoricalTest}
+            disabled={loading}
+            className="flex items-center justify-center gap-2 px-6 py-2.5 bg-cyan-500 hover:bg-cyan-400 text-black font-bold uppercase tracking-wider rounded transition-all disabled:opacity-50"
           >
-            {running ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-            <span>Re-Run Simulation</span>
+            {loading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-current" />}
+            {loading ? 'Воспроизведение...' : 'Запустить Historical Test'}
           </button>
         </div>
 
-        {/* Strategy Configuration Card */}
-        <div className="terminal-card p-4 text-xs">
-          <div className="flex items-center gap-2 mb-3 text-slate-300 font-semibold">
-            <SlidersHorizontal className="h-3.5 w-3.5 text-indigo-400" />
-            <span>Strategy Parameters &amp; Sizing</span>
+        {/* Configuration Panel */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-8 gap-3 bg-[#0d131a] p-4 rounded-lg border border-[#1b2533]">
+          <div>
+            <label className="text-[#8899a6] text-[10px] uppercase font-bold">Инструмент</label>
+            <select
+              value={asset}
+              onChange={(e) => setAsset(e.target.value)}
+              className="mt-1 w-full bg-[#121b24] border border-[#233142] rounded px-2 py-1.5 text-white font-bold"
+            >
+              {Object.keys(ASSET_CATALOG).map((sym) => (
+                <option key={sym} value={sym}>{sym}</option>
+              ))}
+            </select>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3">
-            <div>
-              <label className="text-[10px] text-slate-400 block mb-1">Asset</label>
-              <select
-                value={symbol}
-                onChange={(e) => setSymbol(e.target.value)}
-                className="w-full bg-[#050810] border border-[#162032] rounded py-1 px-2 text-slate-200 outline-none"
-              >
-                {DEFAULT_ASSETS.map((a) => (
-                  <option key={a.symbol} value={a.symbol}>{a.symbol}</option>
-                ))}
-              </select>
-            </div>
+          <div>
+            <label className="text-[#8899a6] text-[10px] uppercase font-bold">Таймфрейм</label>
+            <select
+              value={timeframe}
+              onChange={(e) => setTimeframe(e.target.value as Timeframe)}
+              className="mt-1 w-full bg-[#121b24] border border-[#233142] rounded px-2 py-1.5 text-white"
+            >
+              <option value="5m">5m</option>
+              <option value="15m">15m</option>
+              <option value="1h">1h</option>
+              <option value="4h">4h</option>
+            </select>
+          </div>
 
-            <div>
-              <label className="text-[10px] text-slate-400 block mb-1">Timeframe</label>
-              <select
-                value={timeframe}
-                onChange={(e) => setTimeframe(e.target.value as Timeframe)}
-                className="w-full bg-[#050810] border border-[#162032] rounded py-1 px-2 text-slate-200 outline-none"
-              >
-                {(['15m', '1h', '4h', '1D'] as Timeframe[]).map((tf) => (
-                  <option key={tf} value={tf}>{tf}</option>
-                ))}
-              </select>
-            </div>
+          <div>
+            <label className="text-[#8899a6] text-[10px] uppercase font-bold">Свечей истории</label>
+            <input
+              type="number"
+              value={candleLimit}
+              onChange={(e) => setCandleLimit(Number(e.target.value))}
+              min={60}
+              max={1000}
+              className="mt-1 w-full bg-[#121b24] border border-[#233142] rounded px-2 py-1.5 text-white"
+            />
+          </div>
 
-            <div>
-              <label className="text-[10px] text-slate-400 block mb-1">Capital ($)</label>
-              <input
-                type="number"
-                value={initialCapital}
-                onChange={(e) => setInitialCapital(Number(e.target.value))}
-                className="w-full bg-[#050810] border border-[#162032] rounded py-1 px-2 text-slate-200 outline-none font-tabular"
-              />
-            </div>
+          <div>
+            <label className="text-[#8899a6] text-[10px] uppercase font-bold">Капитал ($)</label>
+            <input
+              type="number"
+              value={initialBalance}
+              onChange={(e) => setInitialBalance(Number(e.target.value))}
+              className="mt-1 w-full bg-[#121b24] border border-[#233142] rounded px-2 py-1.5 text-white"
+            />
+          </div>
 
-            <div>
-              <label className="text-[10px] text-slate-400 block mb-1">Risk / Trade (%)</label>
-              <input
-                type="number"
-                step="0.5"
-                value={riskPerTrade}
-                onChange={(e) => setRiskPerTrade(Number(e.target.value))}
-                className="w-full bg-[#050810] border border-[#162032] rounded py-1 px-2 text-slate-200 outline-none font-tabular"
-              />
-            </div>
+          <div>
+            <label className="text-[#8899a6] text-[10px] uppercase font-bold">Риск / трейд (%)</label>
+            <input
+              type="number"
+              step={0.5}
+              value={riskPerTrade}
+              onChange={(e) => setRiskPerTrade(Number(e.target.value))}
+              className="mt-1 w-full bg-[#121b24] border border-[#233142] rounded px-2 py-1.5 text-white"
+            />
+          </div>
 
-            <div className="flex flex-col justify-end">
-              <label className="flex items-center gap-2 cursor-pointer pb-1">
-                <input
-                  type="checkbox"
-                  checked={useEmaCross}
-                  onChange={(e) => setUseEmaCross(e.target.checked)}
-                  className="accent-indigo-600"
-                />
-                <span className="text-slate-300">EMA Cross</span>
-              </label>
-            </div>
+          <div>
+            <label className="text-[#8899a6] text-[10px] uppercase font-bold">Комиссия (bps)</label>
+            <input
+              type="number"
+              value={feesBps}
+              onChange={(e) => setFeesBps(Number(e.target.value))}
+              className="mt-1 w-full bg-[#121b24] border border-[#233142] rounded px-2 py-1.5 text-white"
+            />
+          </div>
 
-            <div className="flex flex-col justify-end">
-              <label className="flex items-center gap-2 cursor-pointer pb-1">
-                <input
-                  type="checkbox"
-                  checked={useRsiFilter}
-                  onChange={(e) => setUseRsiFilter(e.target.checked)}
-                  className="accent-indigo-600"
-                />
-                <span className="text-slate-300">RSI Filter</span>
-              </label>
-            </div>
+          <div>
+            <label className="text-[#8899a6] text-[10px] uppercase font-bold">Проскальзывание</label>
+            <input
+              type="number"
+              value={slippageBps}
+              onChange={(e) => setSlippageBps(Number(e.target.value))}
+              className="mt-1 w-full bg-[#121b24] border border-[#233142] rounded px-2 py-1.5 text-white"
+            />
+          </div>
+
+          <div>
+            <label className="text-[#8899a6] text-[10px] uppercase font-bold">Правило коллизий</label>
+            <select
+              value={collisionRule}
+              onChange={(e) => setCollisionRule(e.target.value as any)}
+              className="mt-1 w-full bg-[#121b24] border border-[#233142] rounded px-2 py-1.5 text-white"
+            >
+              <option value="SL_FIRST">SL First (Консервативно)</option>
+              <option value="TP_FIRST">TP First</option>
+            </select>
           </div>
         </div>
 
-        {/* Backtest Core Metrics Grid */}
-        {report && (
-          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3 font-tabular text-xs">
-            <div className="terminal-card p-3">
-              <span className="text-[10px] uppercase font-bold text-slate-400 block mb-0.5">Net P&L</span>
-              <div className={`text-base font-extrabold ${report.netProfitUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                {report.netProfitUsd >= 0 ? '+' : ''}${report.netProfitUsd.toLocaleString()}
-              </div>
-              <span className="text-[10px] text-slate-400">({report.netProfitPercent}%)</span>
-            </div>
-
-            <div className="terminal-card p-3">
-              <span className="text-[10px] uppercase font-bold text-slate-400 block mb-0.5">Win Rate</span>
-              <div className="text-base font-extrabold text-slate-100">{report.winRatePercent}%</div>
-              <span className="text-[10px] text-slate-400">{report.totalTrades} Total Trades</span>
-            </div>
-
-            <div className="terminal-card p-3">
-              <span className="text-[10px] uppercase font-bold text-slate-400 block mb-0.5">Profit Factor</span>
-              <div className="text-base font-extrabold text-indigo-300">{report.profitFactor}</div>
-              <span className="text-[10px] text-slate-400">Gross Win / Loss</span>
-            </div>
-
-            <div className="terminal-card p-3">
-              <span className="text-[10px] uppercase font-bold text-slate-400 block mb-0.5">Sharpe Ratio</span>
-              <div className="text-base font-extrabold text-emerald-400">{report.sharpeRatio}</div>
-              <span className="text-[10px] text-slate-400">Sortino: {report.sortinoRatio}</span>
-            </div>
-
-            <div className="terminal-card p-3">
-              <span className="text-[10px] uppercase font-bold text-rose-400 block mb-0.5">Max Drawdown</span>
-              <div className="text-base font-extrabold text-rose-400">-{report.maxDrawdownPercent}%</div>
-              <span className="text-[10px] text-slate-400">Recovery: {report.recoveryFactor}x</span>
-            </div>
-
-            <div className="terminal-card p-3">
-              <span className="text-[10px] uppercase font-bold text-slate-400 block mb-0.5">Expectancy</span>
-              <div className="text-base font-extrabold text-slate-100">+${report.expectancyUsd}</div>
-              <span className="text-[10px] text-slate-400">Avg Trade / PnL</span>
+        {error && (
+          <div className="bg-red-950/40 border border-red-500/50 p-4 rounded text-red-200 flex items-center gap-3">
+            <AlertTriangle className="w-5 h-5 text-red-400 flex-shrink-0" />
+            <div>
+              <div className="font-bold">Ошибка бэктеста:</div>
+              <div>{error}</div>
             </div>
           </div>
         )}
 
-        {/* Equity Curve SVG Visualizer */}
-        {report && report.equityCurve.length > 1 && (
-          <div className="terminal-card p-4">
-            <div className="flex items-center justify-between pb-2 border-b border-[#162032] mb-3 text-xs">
-              <div className="flex items-center gap-2">
-                <TrendingUp className="h-4 w-4 text-emerald-400" />
-                <span className="font-bold text-slate-100 uppercase tracking-wider text-[11px]">
-                  Simulation Equity Curve
-                </span>
+        {/* Results Overview */}
+        {replay && (
+          <div className="space-y-6">
+            {/* KPI Cards */}
+            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
+              <div className="bg-[#0d131a] p-3 rounded border border-[#1b2533]">
+                <div className="text-[#8899a6] text-[10px] uppercase font-bold">Всего сделок</div>
+                <div className="text-xl font-bold text-white mt-1">{replay.totalTradesExecuted}</div>
+                <div className="text-[10px] text-[#8899a6]">Long: {replay.longTrades} | Short: {replay.shortTrades}</div>
               </div>
-              <span className="text-[10px] text-slate-400 font-tabular">
-                Start: ${initialCapital.toLocaleString()} → Terminal: ${Math.round(report.equityCurve[report.equityCurve.length - 1].equity).toLocaleString()}
-              </span>
+
+              <div className="bg-[#0d131a] p-3 rounded border border-[#1b2533]">
+                <div className="text-[#8899a6] text-[10px] uppercase font-bold">Win Rate</div>
+                <div className={`text-xl font-bold mt-1 ${replay.winRate >= 50 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  {replay.winRate}%
+                </div>
+                <div className="text-[10px] text-[#8899a6]">Wins: {replay.wins} | Losses: {replay.losses}</div>
+              </div>
+
+              <div className="bg-[#0d131a] p-3 rounded border border-[#1b2533]">
+                <div className="text-[#8899a6] text-[10px] uppercase font-bold">Profit Factor</div>
+                <div className={`text-xl font-bold mt-1 ${replay.profitFactor >= 1.5 ? 'text-emerald-400' : replay.profitFactor >= 1.0 ? 'text-amber-400' : 'text-red-400'}`}>
+                  {replay.profitFactor}
+                </div>
+                <div className="text-[10px] text-[#8899a6]">Gross Wins / Losses</div>
+              </div>
+
+              <div className="bg-[#0d131a] p-3 rounded border border-[#1b2533]">
+                <div className="text-[#8899a6] text-[10px] uppercase font-bold">Expectancy (R)</div>
+                <div className={`text-xl font-bold mt-1 ${replay.expectancyR > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {replay.expectancyR > 0 ? `+${replay.expectancyR}` : replay.expectancyR}R
+                </div>
+                <div className="text-[10px] text-[#8899a6]">Avg R: {replay.averageR}R</div>
+              </div>
+
+              <div className="bg-[#0d131a] p-3 rounded border border-[#1b2533]">
+                <div className="text-[#8899a6] text-[10px] uppercase font-bold">Net PnL</div>
+                <div className={`text-xl font-bold mt-1 ${replay.netPnlUsd >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {replay.netPnlUsd >= 0 ? `+$${replay.netPnlUsd}` : `-$${Math.abs(replay.netPnlUsd)}`}
+                </div>
+                <div className="text-[10px] text-[#8899a6]">Комиссии: -${replay.totalFeesUsd}</div>
+              </div>
+
+              <div className="bg-[#0d131a] p-3 rounded border border-[#1b2533]">
+                <div className="text-[#8899a6] text-[10px] uppercase font-bold">Max Drawdown</div>
+                <div className="text-xl font-bold text-red-400 mt-1">
+                  -{replay.maxDrawdownPercent}%
+                </div>
+                <div className="text-[10px] text-[#8899a6]">-${replay.maxDrawdownUsd}</div>
+              </div>
+
+              <div className="bg-[#0d131a] p-3 rounded border border-[#1b2533]">
+                <div className="text-[#8899a6] text-[10px] uppercase font-bold">Sharpe / Sortino</div>
+                <div className="text-xl font-bold text-white mt-1">
+                  {replay.sharpeRatio} / {replay.sortinoRatio}
+                </div>
+                <div className="text-[10px] text-[#8899a6]">Risk-adjusted</div>
+              </div>
+
+              <div className="bg-[#0d131a] p-3 rounded border border-[#1b2533]">
+                <div className="text-[#8899a6] text-[10px] uppercase font-bold">Avg MFE / MAE</div>
+                <div className="text-xl font-bold text-cyan-300 mt-1">
+                  +{replay.averageMfePercent}% / -{replay.averageMaePercent}%
+                </div>
+                <div className="text-[10px] text-[#8899a6]">Excursion stats</div>
+              </div>
             </div>
 
-            <div className="h-56 w-full relative">
-              <svg className="w-full h-full overflow-visible" preserveAspectRatio="none" viewBox="0 0 100 100">
-                {/* Horizontal guide lines */}
-                <line x1="0" y1="20" x2="100" y2="20" stroke="#162032" strokeWidth="0.5" />
-                <line x1="0" y1="50" x2="100" y2="50" stroke="#162032" strokeWidth="0.5" />
-                <line x1="0" y1="80" x2="100" y2="80" stroke="#162032" strokeWidth="0.5" />
+            {/* Equity Curve & Drawdown View */}
+            <div className="bg-[#0d131a] p-5 rounded-lg border border-[#1b2533]">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2 font-bold text-white uppercase tracking-wider">
+                  <LineChart className="w-4 h-4 text-cyan-400" />
+                  <span>Кривая капитала (Equity Curve) & Просадки</span>
+                </div>
+                <div className="text-xs text-[#8899a6]">
+                  Баланс: <span className="text-white font-bold">${replay.finalBalance}</span> (Старт: ${replay.config.initialBalance})
+                </div>
+              </div>
 
-                {/* Path line */}
-                {(() => {
-                  const equities = report.equityCurve.map((e) => e.equity);
-                  const min = Math.min(...equities) * 0.98;
-                  const max = Math.max(...equities) * 1.02;
-                  const range = max - min || 1;
+              {/* Simple ASCII / Visual Equity Chart representation */}
+              <div className="h-44 bg-[#080d12] rounded border border-[#17222e] p-3 flex flex-col justify-between relative overflow-hidden">
+                <div className="flex justify-between text-[10px] text-[#556677] border-b border-[#141d27] pb-1">
+                  <span>Start: ${replay.config.initialBalance}</span>
+                  <span>Peak: ${Math.max(...replay.equityCurve.map((e: any) => e.equity))}</span>
+                  <span>End: ${replay.finalBalance}</span>
+                </div>
 
-                  const points = report.equityCurve.map((e, idx) => {
-                    const x = (idx / (report.equityCurve.length - 1)) * 100;
-                    const y = 100 - ((e.equity - min) / range) * 100;
-                    return `${x},${y}`;
-                  }).join(' ');
+                <div className="flex-1 flex items-end gap-1 pt-2 pb-2">
+                  {replay.equityCurve.map((pt: any, i: number) => {
+                    const minEq = Math.min(...replay.equityCurve.map((e: any) => e.equity)) * 0.98;
+                    const maxEq = Math.max(...replay.equityCurve.map((e: any) => e.equity)) * 1.02;
+                    const range = Math.max(1, maxEq - minEq);
+                    const heightPct = Math.max(5, Math.min(100, ((pt.equity - minEq) / range) * 100));
+                    const isProfit = pt.equity >= replay.config.initialBalance;
 
-                  return (
-                    <polyline
-                      fill="none"
-                      stroke="#10B981"
-                      strokeWidth="1.8"
-                      points={points}
-                    />
-                  );
-                })()}
-              </svg>
+                    return (
+                      <div
+                        key={i}
+                        className="flex-1 flex flex-col justify-end items-center group relative h-full"
+                      >
+                        <div
+                          style={{ height: `${heightPct}%` }}
+                          className={`w-full rounded-t transition-all ${isProfit ? 'bg-cyan-500/80 group-hover:bg-cyan-400' : 'bg-red-500/80 group-hover:bg-red-400'}`}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="text-[10px] text-[#556677] flex justify-between border-t border-[#141d27] pt-1">
+                  <span>Свеча: {replay.totalCandles} шт.</span>
+                  <span>Max Drawdown: -{replay.maxDrawdownPercent}%</span>
+                  <span>Сделок: {replay.totalTradesExecuted}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Quality Breakdowns (Regime, Confidence, R:R, Direction) */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Regime Breakdown */}
+              <div className="bg-[#0d131a] p-4 rounded-lg border border-[#1b2533]">
+                <div className="font-bold text-white uppercase tracking-wider mb-3 flex items-center gap-2">
+                  <Activity className="w-4 h-4 text-amber-400" />
+                  <span>Эффективность по рыночным режимам (Regimes)</span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="text-[10px] text-[#8899a6] border-b border-[#1b2533]">
+                        <th className="pb-2">Режим</th>
+                        <th className="pb-2">Сделок</th>
+                        <th className="pb-2">Win Rate</th>
+                        <th className="pb-2">Profit Factor</th>
+                        <th className="pb-2">Expectancy</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#141d27]">
+                      {Object.entries(replay.breakdownByRegime).map(([reg, m]: [string, any]) => (
+                        <tr key={reg} className="hover:bg-[#121a24]">
+                          <td className="py-2 text-white font-bold">{reg}</td>
+                          {m === 'INSUFFICIENT_SAMPLE' ? (
+                            <td colSpan={4} className="py-2 text-[#667788] italic">INSUFFICIENT_SAMPLE (&lt; 3 трейдов)</td>
+                          ) : (
+                            <>
+                              <td className="py-2">{m.signals}</td>
+                              <td className={`py-2 font-bold ${m.winRate >= 50 ? 'text-emerald-400' : 'text-amber-400'}`}>{m.winRate}%</td>
+                              <td className="py-2">{m.profitFactor}</td>
+                              <td className="py-2">{m.expectancyR}R</td>
+                            </>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Confidence Calibration */}
+              <div className="bg-[#0d131a] p-4 rounded-lg border border-[#1b2533]">
+                <div className="font-bold text-white uppercase tracking-wider mb-3 flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                  <span>Калибровка уверенности (Confidence Buckets)</span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="text-[10px] text-[#8899a6] border-b border-[#1b2533]">
+                        <th className="pb-2">Диапазон</th>
+                        <th className="pb-2">Сделок</th>
+                        <th className="pb-2">Факт. Win Rate</th>
+                        <th className="pb-2">Дельта</th>
+                        <th className="pb-2">Статус</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#141d27]">
+                      {calibration?.buckets?.map((b: any) => (
+                        <tr key={b.bucketRange} className="hover:bg-[#121a24]">
+                          <td className="py-2 text-white font-bold">{b.bucketRange}</td>
+                          <td className="py-2">{b.sampleCount}</td>
+                          {b.status === 'INSUFFICIENT_SAMPLE' ? (
+                            <td colSpan={3} className="py-2 text-[#667788] italic">INSUFFICIENT_SAMPLE</td>
+                          ) : (
+                            <>
+                              <td className="py-2 font-bold text-cyan-300">{b.realizedWinRate}%</td>
+                              <td className="py-2">{b.calibrationDelta > 0 ? `+${b.calibrationDelta}` : b.calibrationDelta}%</td>
+                              <td className="py-2">
+                                <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${b.status === 'CALIBRATED' ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/40' : 'bg-amber-950 text-amber-300 border border-amber-500/40'}`}>
+                                  {b.status}
+                                </span>
+                              </td>
+                            </>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="mt-3 text-[11px] text-[#8899a6] border-t border-[#1b2533] pt-2">
+                  Вердикт: <span className="text-white">{calibration?.verdict}</span> (ECE: {calibration?.expectedCalibrationError}%)
+                </div>
+              </div>
+            </div>
+
+            {/* Walk Forward & Monte Carlo Section */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Walk Forward */}
+              <div className="bg-[#0d131a] p-4 rounded-lg border border-[#1b2533]">
+                <div className="font-bold text-white uppercase tracking-wider mb-3 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Layers className="w-4 h-4 text-cyan-400" />
+                    <span>Walk-Forward Rolling Analysis (In-Sample vs Unseen OOS)</span>
+                  </div>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${walkForward?.robustnessGrade === 'ROBUST' ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/40' : 'bg-amber-950 text-amber-300 border border-amber-500/40'}`}>
+                    {walkForward?.robustnessGrade}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 mb-3 bg-[#080d12] p-3 rounded border border-[#17222e]">
+                  <div>
+                    <div className="text-[#8899a6] text-[10px] uppercase">In-Sample (Train)</div>
+                    <div className="text-sm font-bold text-white mt-0.5">WR: {walkForward?.aggregateInSample?.winRate}% | PF: {walkForward?.aggregateInSample?.profitFactor}</div>
+                  </div>
+                  <div>
+                    <div className="text-[#8899a6] text-[10px] uppercase">Out-Of-Sample (Unseen)</div>
+                    <div className="text-sm font-bold text-cyan-300 mt-0.5">WR: {walkForward?.aggregateOutOfSample?.winRate}% | PF: {walkForward?.aggregateOutOfSample?.profitFactor}</div>
+                  </div>
+                </div>
+
+                <div className="text-[11px] text-[#8899a6]">
+                  Walk-Forward Efficiency (WFE): <span className="text-white font-bold">{walkForward?.meanWFE}</span>. {walkForward?.verdict}
+                </div>
+              </div>
+
+              {/* Monte Carlo */}
+              <div className="bg-[#0d131a] p-4 rounded-lg border border-[#1b2533]">
+                <div className="font-bold text-white uppercase tracking-wider mb-3 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Dices className="w-4 h-4 text-purple-400" />
+                    <span>Monte Carlo 10,000 Bootstrap (Реальные сделки)</span>
+                  </div>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${monteCarlo?.riskOfRuinVerdict === 'LOW' ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/40' : 'bg-red-950 text-red-300 border border-red-500/40'}`}>
+                    Ruin Risk: {monteCarlo?.riskOfRuinVerdict}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-5 gap-2 text-center bg-[#080d12] p-2.5 rounded border border-[#17222e] mb-3">
+                  <div>
+                    <div className="text-[#667788] text-[9px]">P5 (Worst)</div>
+                    <div className="text-xs font-bold text-red-400 mt-0.5">${monteCarlo?.finalEquity?.p5}</div>
+                  </div>
+                  <div>
+                    <div className="text-[#667788] text-[9px]">P25</div>
+                    <div className="text-xs font-bold text-amber-400 mt-0.5">${monteCarlo?.finalEquity?.p25}</div>
+                  </div>
+                  <div>
+                    <div className="text-[#667788] text-[9px]">P50 (Median)</div>
+                    <div className="text-xs font-bold text-white mt-0.5">${monteCarlo?.finalEquity?.p50}</div>
+                  </div>
+                  <div>
+                    <div className="text-[#667788] text-[9px]">P75</div>
+                    <div className="text-xs font-bold text-cyan-300 mt-0.5">${monteCarlo?.finalEquity?.p75}</div>
+                  </div>
+                  <div>
+                    <div className="text-[#667788] text-[9px]">P95 (Best)</div>
+                    <div className="text-xs font-bold text-emerald-400 mt-0.5">${monteCarlo?.finalEquity?.p95}</div>
+                  </div>
+                </div>
+
+                <div className="flex justify-between text-[11px] text-[#8899a6]">
+                  <span>Вероятность отриц. исхода: <strong className="text-white">{monteCarlo?.probabilityOfNegativeReturn}%</strong></span>
+                  <span>Риск разорения (&gt;50% DD): <strong className="text-red-400">{monteCarlo?.probabilityOfRuin}%</strong></span>
+                </div>
+              </div>
+            </div>
+
+            {/* Limitations & Disclaimers */}
+            <div className="bg-[#121820] border border-[#233142] p-4 rounded-lg">
+              <div className="flex items-center gap-2 font-bold text-amber-300 mb-2">
+                <ShieldAlert className="w-4 h-4" />
+                <span>Ограничения модели и раскрытие информации (Anti-Overfitting Rules)</span>
+              </div>
+              <ul className="list-disc list-inside space-y-1 text-[#8899a6] text-[11px]">
+                {replay.limitations.map((lim: string, idx: number) => (
+                  <li key={idx}>{lim}</li>
+                ))}
+              </ul>
             </div>
           </div>
         )}
-
-        {/* Advanced Validation: Walk-Forward & Monte Carlo */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {/* Walk-Forward Overfitting Card */}
-          {walkForward && (
-            <div className="terminal-card p-4 text-xs">
-              <div className="flex items-center justify-between pb-2 border-b border-[#162032] mb-3">
-                <div className="flex items-center gap-2">
-                  <ShieldCheck className="h-4 w-4 text-indigo-400" />
-                  <span className="font-bold text-slate-100 uppercase tracking-wider text-[11px]">
-                    Walk-Forward Validation
-                  </span>
-                </div>
-                <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                  walkForward.robustnessGrade === 'ROBUST'
-                    ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
-                    : 'bg-amber-950 text-amber-300 border border-amber-800'
-                }`}>
-                  {walkForward.robustnessGrade}
-                </span>
-              </div>
-
-              <div className="grid grid-cols-3 gap-2 font-tabular text-center mb-3">
-                <div className="p-2 rounded bg-[#070A14] border border-[#162032]">
-                  <span className="text-[10px] text-slate-400 block mb-0.5">In-Sample Sharpe</span>
-                  <span className="font-bold text-slate-100">{walkForward.inSampleSharpe}</span>
-                </div>
-                <div className="p-2 rounded bg-[#070A14] border border-[#162032]">
-                  <span className="text-[10px] text-slate-400 block mb-0.5">Out-Of-Sample</span>
-                  <span className="font-bold text-slate-100">{walkForward.outOfSampleSharpe}</span>
-                </div>
-                <div className="p-2 rounded bg-[#070A14] border border-[#162032]">
-                  <span className="text-[10px] text-slate-400 block mb-0.5">Degradation %</span>
-                  <span className={`font-bold ${walkForward.degradationPercent > 30 ? 'text-amber-400' : 'text-emerald-400'}`}>
-                    {walkForward.degradationPercent}%
-                  </span>
-                </div>
-              </div>
-
-              <p className="text-slate-400 text-[11px] leading-relaxed">
-                Strategy demonstrates consistent out-of-sample edge with minimal curve-fitting degradation across historical partition windows.
-              </p>
-            </div>
-          )}
-
-          {/* Monte Carlo Bootstrap Card */}
-          {monteCarlo && (
-            <div className="terminal-card p-4 text-xs">
-              <div className="flex items-center justify-between pb-2 border-b border-[#162032] mb-3">
-                <div className="flex items-center gap-2">
-                  <Dices className="h-4 w-4 text-indigo-400" />
-                  <span className="font-bold text-slate-100 uppercase tracking-wider text-[11px]">
-                    Monte Carlo Stress (1,000 Runs)
-                  </span>
-                </div>
-                <span className="text-[10px] text-slate-400 font-tabular">Bootstrap Resampling</span>
-              </div>
-
-              <div className="grid grid-cols-4 gap-2 font-tabular text-center mb-3">
-                <div className="p-2 rounded bg-[#070A14] border border-[#162032]">
-                  <span className="text-[9px] text-rose-400 block mb-0.5">Ruin Risk</span>
-                  <span className="font-bold text-slate-100">{monteCarlo.probabilityOfRuin}%</span>
-                </div>
-                <div className="p-2 rounded bg-[#070A14] border border-[#162032]">
-                  <span className="text-[9px] text-slate-400 block mb-0.5">5th Percentile</span>
-                  <span className="font-bold text-slate-100">${monteCarlo.p5TerminalEquity.toLocaleString()}</span>
-                </div>
-                <div className="p-2 rounded bg-[#070A14] border border-[#162032]">
-                  <span className="text-[9px] text-slate-400 block mb-0.5">Median (p50)</span>
-                  <span className="font-bold text-emerald-400">${monteCarlo.p50TerminalEquity.toLocaleString()}</span>
-                </div>
-                <div className="p-2 rounded bg-[#070A14] border border-[#162032]">
-                  <span className="text-[9px] text-slate-400 block mb-0.5">95th Percentile</span>
-                  <span className="font-bold text-indigo-300">${monteCarlo.p95TerminalEquity.toLocaleString()}</span>
-                </div>
-              </div>
-
-              <p className="text-slate-400 text-[11px] leading-relaxed">
-                Empirical permutation verifies that catastrophic drawdown risk remains under control across randomized sequence orderings.
-              </p>
-            </div>
-          )}
-        </div>
       </main>
     </div>
   );
