@@ -33,6 +33,38 @@ export interface TradePlan {
   hasValidTarget: boolean;
 }
 
+export type RejectionReasonCode =
+  | 'INSUFFICIENT_DATA'
+  | 'STALE_DATA'
+  | 'BAD_RR'
+  | 'STOP_TOO_FAR'
+  | 'HIGH_VOLATILITY'
+  | 'MTF_CONFLICT'
+  | 'WEAK_STRUCTURE'
+  | 'WEAK_MOMENTUM'
+  | 'LOW_VOLUME'
+  | 'RESISTANCE_TOO_CLOSE'
+  | 'SUPPORT_TOO_CLOSE'
+  | 'MARKET_CLOSED'
+  | 'OTHER';
+
+export type FunnelStage =
+  | 'POTENTIAL'
+  | 'STRUCTURE_PASSED'
+  | 'REGIME_PASSED'
+  | 'MTF_PASSED'
+  | 'RISK_PASSED'
+  | 'FINAL_SIGNAL';
+
+export interface FilterAblationConfig {
+  skipMtfFilter?: boolean;
+  skipVolatilityFilter?: boolean;
+  skipRiskRewardFilter?: boolean;
+  skipStructureFilter?: boolean;
+  skipMomentumFilter?: boolean;
+  skipResistanceFilter?: boolean;
+}
+
 export interface UnifiedSignalResult {
   id: string;
   symbol: string;
@@ -63,6 +95,12 @@ export interface UnifiedSignalResult {
     dominantBias: string;
   };
   rejectionReason?: string;
+  rejectionCode?: RejectionReasonCode;
+  rejectionReasonCode?: RejectionReasonCode;
+  funnelStageReached: FunnelStage;
+  whyThisSignal?: { factor: string; score: number; description: string }[];
+  invalidationPrice?: number;
+  invalidationReason?: string;
 }
 
 export class SignalDecisionEngine {
@@ -76,7 +114,8 @@ export class SignalDecisionEngine {
     timeframe: Timeframe = '1h',
     isMarketOpen = true,
     isDataLive = true,
-    minRiskRewardThreshold = 1.5
+    minRiskRewardThreshold = 1.5,
+    ablation?: FilterAblationConfig
   ): UnifiedSignalResult {
     const timestamp = Date.now();
     const id = `sig-${symbol}-${timeframe}-${timestamp}`;
@@ -86,6 +125,8 @@ export class SignalDecisionEngine {
       return this.createNoSetupResult(
         id, symbol, timeframe, timestamp,
         'Недостаточно исторических свечей (минимум 30) для статистического анализа.',
+        'INSUFFICIENT_DATA',
+        'POTENTIAL',
         candles
       );
     }
@@ -95,6 +136,18 @@ export class SignalDecisionEngine {
       return this.createNoSetupResult(
         id, symbol, timeframe, timestamp,
         'Данные котировок не обновляются или находятся в статусе OFFLINE. Торговые сигналы заблокированы.',
+        'STALE_DATA',
+        'POTENTIAL',
+        candles
+      );
+    }
+
+    if (!isMarketOpen) {
+      return this.createNoSetupResult(
+        id, symbol, timeframe, timestamp,
+        'Рынок закрыт (вне торговых часов биржи). Сигналы заблокированы.',
+        'MARKET_CLOSED',
+        'POTENTIAL',
         candles
       );
     }
@@ -105,6 +158,8 @@ export class SignalDecisionEngine {
       return this.createNoSetupResult(
         id, symbol, timeframe, timestamp,
         'Ошибка извлечения количественных признаков.',
+        'OTHER',
+        'POTENTIAL',
         candles
       );
     }
@@ -119,17 +174,19 @@ export class SignalDecisionEngine {
     const mtf = MultiTimeframeEngine.analyze(candles, timeframe);
 
     // Gate 3: Extreme Volatility filter
-    if (features.atrPercent > 5.5) {
+    if (!ablation?.skipVolatilityFilter && features.atrPercent > 5.5) {
       return this.createNoSetupResult(
         id, symbol, timeframe, timestamp,
         `Экстремальная волатильность (ATR ${features.atrPercent.toFixed(2)}% > 5.5%). Повышенный риск каскадных ликвидаций.`,
+        'HIGH_VOLATILITY',
+        'REGIME_PASSED',
         candles, features, structure, regime, mtf
       );
     }
 
     // 5. Evaluate Long and Short Setups via distinct symmetric models
-    const longEvaluation = this.evaluateLongSetup(features, structure, regime, mtf);
-    const shortEvaluation = this.evaluateShortSetup(features, structure, regime, mtf);
+    const longEvaluation = this.evaluateLongSetup(features, structure, regime, mtf, ablation);
+    const shortEvaluation = this.evaluateShortSetup(features, structure, regime, mtf, ablation);
 
     // Pick candidate based on validated score
     let candidateDirection: SignalDirection = 'NEUTRAL';
@@ -148,9 +205,17 @@ export class SignalDecisionEngine {
       candidateEvidence = shortEvaluation.evidence;
       candidateState = shortEvaluation.state;
     } else {
+      const rejCode: RejectionReasonCode = structure.state === 'UNCERTAIN' || structure.state === 'RANGE'
+        ? 'WEAK_STRUCTURE'
+        : mtf.conflicts.length > 0 && !ablation?.skipMtfFilter
+        ? 'MTF_CONFLICT'
+        : 'WEAK_MOMENTUM';
+
       return this.createNoSetupResult(
         id, symbol, timeframe, timestamp,
         'Рынок находится в фазе бокового накопления / отсутствуют подтверждённые условия входа.',
+        rejCode,
+        'STRUCTURE_PASSED',
         candles, features, structure, regime, mtf,
         [...longEvaluation.evidence, ...shortEvaluation.evidence]
       );
@@ -165,10 +230,12 @@ export class SignalDecisionEngine {
     );
 
     // Gate 4: Risk / Reward Filter
-    if (!tradePlan.hasValidTarget || tradePlan.riskRewardRatio < minRiskRewardThreshold) {
+    if (!ablation?.skipRiskRewardFilter && (!tradePlan.hasValidTarget || tradePlan.riskRewardRatio < minRiskRewardThreshold)) {
       return this.createNoSetupResult(
         id, symbol, timeframe, timestamp,
         `Неприемлемый коэффициент риск/прибыль (R:R ${tradePlan.riskRewardRatio.toFixed(2)} < ${minRiskRewardThreshold.toFixed(1)}). Ближайшая преграда расположена слишком близко.`,
+        'BAD_RR',
+        'MTF_PASSED',
         candles, features, structure, regime, mtf,
         candidateEvidence
       );
@@ -179,13 +246,14 @@ export class SignalDecisionEngine {
       return this.createNoSetupResult(
         id, symbol, timeframe, timestamp,
         `Слишком широкий стоп-лосс (${tradePlan.stopLossPercent.toFixed(2)}% / ${tradePlan.stopLossAtrMultiple.toFixed(1)} ATR). Защита позиции экономически нецелесообразна.`,
+        'STOP_TOO_FAR',
+        'RISK_PASSED',
         candles, features, structure, regime, mtf,
         candidateEvidence
       );
     }
 
     // 7. Calculate Model Confidence
-    // Based on indicator consensus: MTF alignment, regime confidence, and ADX strength
     const modelConfidence = Math.min(
       94,
       Math.round(
@@ -213,12 +281,21 @@ export class SignalDecisionEngine {
       riskWarnings.push(`Сопротивление расположено близко (${structure.distanceToResistancePct.toFixed(2)}% от входа).`);
     }
 
+    const invalidationPrice = tradePlan.stopLoss;
+    const invalidationReason = candidateDirection === 'LONG'
+      ? `Закрытие свечи ${timeframe} ниже опорного уровня $${tradePlan.stopLoss}`
+      : `Закрытие свечи ${timeframe} выше барьера сопротивления $${tradePlan.stopLoss}`;
+
     const invalidationCriteria: string[] = [
-      candidateDirection === 'LONG'
-        ? `Закрытие свечи ${timeframe} ниже опорного уровня $${tradePlan.stopLoss}`
-        : `Закрытие свечи ${timeframe} выше барьера сопротивления $${tradePlan.stopLoss}`,
+      invalidationReason,
       `Резкая смена рыночного режима на ${candidateDirection === 'LONG' ? 'TRENDING_BEAR' : 'TRENDING_BULL'}`,
     ];
+
+    const whyThisSignal = candidateEvidence.map((e) => ({
+      factor: e.name,
+      score: e.contribution,
+      description: e.reason,
+    }));
 
     return {
       id,
@@ -249,6 +326,10 @@ export class SignalDecisionEngine {
         alignmentScore: mtf.alignmentScore,
         dominantBias: mtf.dominantBias,
       },
+      funnelStageReached: 'FINAL_SIGNAL',
+      whyThisSignal,
+      invalidationPrice,
+      invalidationReason,
     };
   }
 
@@ -259,7 +340,8 @@ export class SignalDecisionEngine {
     feat: QuantFeatures,
     struct: DetailedMarketStructure,
     regime: MarketRegimeState,
-    mtf: DetailedMTFAnalysis
+    mtf: DetailedMTFAnalysis,
+    ablation?: FilterAblationConfig
   ): { isValid: boolean; quality: number; state: SetupState; evidence: EvidenceFactor[] } {
     const evidence: EvidenceFactor[] = [];
     let score = 0;
@@ -363,7 +445,7 @@ export class SignalDecisionEngine {
         reason: 'Осциллятор в зоне экстремума: повышен риск глубокой коррекции.',
       });
     }
-    if (struct.distanceToResistancePct < 0.6) {
+    if (!ablation?.skipResistanceFilter && struct.distanceToResistancePct < 0.6) {
       score -= 7;
       evidence.push({
         name: 'Штраф: Вход в сопротивление',
@@ -375,7 +457,9 @@ export class SignalDecisionEngine {
     }
 
     const quality = Math.max(0, Math.min(100, score));
-    const isValid = quality >= 60 && (struct.state === 'BULLISH_STRUCTURE' || struct.state === 'BREAKOUT' || regime.regime === 'TRENDING_BULL');
+    const minQ = ablation?.skipMomentumFilter ? 50 : 60;
+    const structureValid = ablation?.skipStructureFilter ? true : (struct.state === 'BULLISH_STRUCTURE' || struct.state === 'BREAKOUT' || regime.regime === 'TRENDING_BULL');
+    const isValid = quality >= minQ && structureValid;
     const state: SetupState = struct.state === 'BREAKOUT' ? 'ACTIVE' : quality >= 75 ? 'CONFIRMED' : 'FORMING';
 
     return { isValid, quality, state, evidence };
@@ -388,7 +472,8 @@ export class SignalDecisionEngine {
     feat: QuantFeatures,
     struct: DetailedMarketStructure,
     regime: MarketRegimeState,
-    mtf: DetailedMTFAnalysis
+    mtf: DetailedMTFAnalysis,
+    ablation?: FilterAblationConfig
   ): { isValid: boolean; quality: number; state: SetupState; evidence: EvidenceFactor[] } {
     const evidence: EvidenceFactor[] = [];
     let score = 0;
@@ -492,7 +577,7 @@ export class SignalDecisionEngine {
         reason: 'Осциллятор в зоне экстремальной перепроданности: риск резкого шорт-сквиза.',
       });
     }
-    if (struct.distanceToSupportPct < 0.6) {
+    if (!ablation?.skipResistanceFilter && struct.distanceToSupportPct < 0.6) {
       score -= 7;
       evidence.push({
         name: 'Штраф: Продажа в поддержку',
@@ -504,7 +589,9 @@ export class SignalDecisionEngine {
     }
 
     const quality = Math.max(0, Math.min(100, score));
-    const isValid = quality >= 60 && (struct.state === 'BEARISH_STRUCTURE' || struct.state === 'BREAKDOWN' || regime.regime === 'TRENDING_BEAR');
+    const minQ = ablation?.skipMomentumFilter ? 50 : 60;
+    const structureValid = ablation?.skipStructureFilter ? true : (struct.state === 'BEARISH_STRUCTURE' || struct.state === 'BREAKDOWN' || regime.regime === 'TRENDING_BEAR');
+    const isValid = quality >= minQ && structureValid;
     const state: SetupState = struct.state === 'BREAKDOWN' ? 'ACTIVE' : quality >= 75 ? 'CONFIRMED' : 'FORMING';
 
     return { isValid, quality, state, evidence };
@@ -626,6 +713,8 @@ export class SignalDecisionEngine {
     timeframe: Timeframe,
     timestamp: number,
     rejectionReason: string,
+    rejectionCode: RejectionReasonCode = 'OTHER',
+    funnelStageReached: FunnelStage = 'POTENTIAL',
     candles?: Candle[],
     features?: QuantFeatures,
     structure?: DetailedMarketStructure,
@@ -665,6 +754,10 @@ export class SignalDecisionEngine {
         dominantBias: mtf?.dominantBias || 'NEUTRAL',
       },
       rejectionReason,
+      rejectionCode,
+      rejectionReasonCode: rejectionCode,
+      funnelStageReached,
+      whyThisSignal: [],
     };
   }
 }

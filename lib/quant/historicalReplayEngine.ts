@@ -1,5 +1,15 @@
 import { Candle, Timeframe } from '../types';
-import { SignalDecisionEngine, UnifiedSignalResult } from './signalDecisionEngine';
+import { DataQualityEngine, DataQualityReport } from '../market/dataQualityEngine';
+import { QuantFeatureEngine } from './featureEngine';
+import { MarketStructureEngine } from './marketStructureEngine';
+import { MarketRegimeEngine } from './regimeEngine';
+import {
+  FilterAblationConfig,
+  FunnelStage,
+  RejectionReasonCode,
+  SignalDecisionEngine,
+  UnifiedSignalResult,
+} from './signalDecisionEngine';
 
 export interface ReplayConfig {
   asset: string;
@@ -13,6 +23,7 @@ export interface ReplayConfig {
   minRiskReward?: number;
   startDate?: number;
   endDate?: number;
+  ablation?: FilterAblationConfig;
 }
 
 export type TradeOutcome = 'WIN' | 'LOSS' | 'TIMEOUT' | 'INVALIDATED';
@@ -50,6 +61,10 @@ export interface ReplayedTrade {
   regimeAtEntry: string;
   confidenceAtEntry: number;
   qualityAtEntry: number;
+  whyThisSignal?: string[];
+  invalidationPrice?: number;
+  invalidationReason?: string;
+  funnelStage?: FunnelStage;
 }
 
 export interface EquityPoint {
@@ -76,7 +91,7 @@ export interface MetricGroup {
 
 export interface ReplaySummary {
   config: Required<ReplayConfig>;
-  status: 'SUCCESS' | 'INSUFFICIENT_DATA';
+  status: 'SUCCESS' | 'INSUFFICIENT_DATA' | 'DATASET_INVALID';
   totalCandles: number;
   totalSignalsGenerated: number;
   totalTradesExecuted: number;
@@ -114,6 +129,18 @@ export interface ReplaySummary {
   };
   collisionRuleUsed: 'SL_FIRST' | 'TP_FIRST';
   limitations: string[];
+  dataQuality?: DataQualityReport;
+  regimeCoverage?: Record<string, { count: number; percentage: number }>;
+  rejectionFunnel?: {
+    potentialBars: number;
+    structurePassed: number;
+    regimePassed: number;
+    mtfPassed: number;
+    riskPassed: number;
+    finalSignals: number;
+  };
+  rejectionHistogram?: Record<string, number>;
+  qualityDistribution?: Record<string, { evaluatedBars: number; trades: number; winRate: number; avgR: number }>;
 }
 
 export class HistoricalReplayEngine {
@@ -133,15 +160,20 @@ export class HistoricalReplayEngine {
       minRiskReward: userConfig.minRiskReward ?? 1.5,
       startDate: userConfig.startDate ?? (candles.length > 0 ? candles[0].time : 0),
       endDate: userConfig.endDate ?? (candles.length > 0 ? candles[candles.length - 1].time : 0),
+      ablation: userConfig.ablation ?? {},
     };
 
+    // 1. Audit and clean dataset
+    const qualityAudit = DataQualityEngine.auditAndClean(candles, userConfig.timeframe);
+    const workingCandles = qualityAudit.cleanCandles.length >= 35 ? qualityAudit.cleanCandles : candles;
+
     // Filter candles within date range
-    const filteredCandles = candles.filter(
+    const filteredCandles = workingCandles.filter(
       (c) => c.time >= config.startDate && c.time <= config.endDate
     );
 
     if (filteredCandles.length < 35) {
-      return this.createInsufficientDataSummary(config, filteredCandles.length);
+      return this.createInsufficientDataSummary(config, filteredCandles.length, qualityAudit);
     }
 
     const trades: ReplayedTrade[] = [];
@@ -178,11 +210,36 @@ export class HistoricalReplayEngine {
       quality: number;
       mfe: number;
       mae: number;
+      whyThisSignal?: string[];
+      invalidationPrice?: number;
+      invalidationReason?: string;
+      funnelStage?: FunnelStage;
     } | null = null;
 
     let pendingSignal: UnifiedSignalResult | null = null;
     let pendingSignalBarIndex = -1;
     let totalSignalsGenerated = 0;
+
+    // Funnel & Attribution tracking
+    const funnel = {
+      potentialBars: 0,
+      structurePassed: 0,
+      regimePassed: 0,
+      mtfPassed: 0,
+      riskPassed: 0,
+      finalSignals: 0,
+    };
+    const rejectionHistogram: Record<string, number> = {};
+    const regimeCounts: Record<string, number> = {};
+    const qualityDistribution: Record<string, { evaluatedBars: number; trades: number; wins: number; totalR: number }> = {
+      '0-20': { evaluatedBars: 0, trades: 0, wins: 0, totalR: 0 },
+      '20-40': { evaluatedBars: 0, trades: 0, wins: 0, totalR: 0 },
+      '40-60': { evaluatedBars: 0, trades: 0, wins: 0, totalR: 0 },
+      '60-70': { evaluatedBars: 0, trades: 0, wins: 0, totalR: 0 },
+      '70-80': { evaluatedBars: 0, trades: 0, wins: 0, totalR: 0 },
+      '80-90': { evaluatedBars: 0, trades: 0, wins: 0, totalR: 0 },
+      '90-100': { evaluatedBars: 0, trades: 0, wins: 0, totalR: 0 },
+    };
 
     // Minimum warmup bars to allow indicators (EMA, RSI, ADX) to initialize
     const warmupBars = 30;
@@ -359,7 +416,24 @@ export class HistoricalReplayEngine {
             regimeAtEntry: activeTrade.regime,
             confidenceAtEntry: activeTrade.confidence,
             qualityAtEntry: activeTrade.quality,
+            whyThisSignal: activeTrade.whyThisSignal,
+            invalidationPrice: activeTrade.invalidationPrice,
+            invalidationReason: activeTrade.invalidationReason,
+            funnelStage: activeTrade.funnelStage,
           };
+
+          // Record trade outcome in quality bucket
+          const tradeQ = activeTrade.quality;
+          let tradeQBucket = '0-20';
+          if (tradeQ >= 90) tradeQBucket = '90-100';
+          else if (tradeQ >= 80) tradeQBucket = '80-90';
+          else if (tradeQ >= 70) tradeQBucket = '70-80';
+          else if (tradeQ >= 60) tradeQBucket = '60-70';
+          else if (tradeQ >= 40) tradeQBucket = '40-60';
+          else if (tradeQ >= 20) tradeQBucket = '20-40';
+          qualityDistribution[tradeQBucket].trades++;
+          if (outcome === 'WIN') qualityDistribution[tradeQBucket].wins++;
+          qualityDistribution[tradeQBucket].totalR += rMultiple;
 
           trades.push(completedTrade);
           equityCurve.push({
@@ -418,39 +492,98 @@ export class HistoricalReplayEngine {
           quality: pendingSignal.setupQuality,
           mfe: 0,
           mae: 0,
+          whyThisSignal: pendingSignal.whyThisSignal?.map((w) => `${w.factor}: ${w.description}`) || pendingSignal.evidence.map((e) => e.name),
+          invalidationPrice: pendingSignal.invalidationPrice ?? plan.stopLoss,
+          invalidationReason: pendingSignal.invalidationReason ?? 'Structure violation / SL breach',
+          funnelStage: pendingSignal.funnelStageReached ?? 'FINAL_SIGNAL',
         };
 
         pendingSignal = null;
         pendingSignalBarIndex = -1;
       }
 
-      // 3. Generate Signal on Closed Bar `t` (Available history strictly [0..t])
-      if (activeTrade === null && pendingSignal === null) {
-        const availableHistory = filteredCandles.slice(0, t + 1);
+      // 3. Attribution & Signal Evaluation on Closed Bar `t` (Available history strictly [0..t])
+      const availableHistory = filteredCandles.slice(0, t + 1);
+      const evaluation = SignalDecisionEngine.evaluate(
+        availableHistory,
+        config.asset,
+        config.timeframe,
+        true,
+        true,
+        config.minRiskReward,
+        config.ablation
+      );
 
-        const evaluation = SignalDecisionEngine.evaluate(
-          availableHistory,
-          config.asset,
-          config.timeframe,
-          true,
-          true,
-          config.minRiskReward
-        );
+      // Market Regime Coverage tracking
+      const currentRegime = evaluation.marketState?.regime ?? 'UNKNOWN';
+      regimeCounts[currentRegime] = (regimeCounts[currentRegime] || 0) + 1;
 
-        if (
-          (evaluation.direction === 'LONG' || evaluation.direction === 'SHORT') &&
-          (evaluation.setupState === 'CONFIRMED' || evaluation.setupState === 'ACTIVE') &&
-          evaluation.tradePlan !== null
-        ) {
-          totalSignalsGenerated++;
-          pendingSignal = evaluation;
-          pendingSignalBarIndex = t;
-        }
+      // Rejection Funnel tracking
+      funnel.potentialBars++;
+      const stage = evaluation.funnelStageReached;
+      if (stage === 'STRUCTURE_PASSED' || stage === 'REGIME_PASSED' || stage === 'MTF_PASSED' || stage === 'RISK_PASSED' || stage === 'FINAL_SIGNAL') {
+        funnel.structurePassed++;
+      }
+      if (stage === 'REGIME_PASSED' || stage === 'MTF_PASSED' || stage === 'RISK_PASSED' || stage === 'FINAL_SIGNAL') {
+        funnel.regimePassed++;
+      }
+      if (stage === 'MTF_PASSED' || stage === 'RISK_PASSED' || stage === 'FINAL_SIGNAL') {
+        funnel.mtfPassed++;
+      }
+      if (stage === 'RISK_PASSED' || stage === 'FINAL_SIGNAL') {
+        funnel.riskPassed++;
+      }
+      if (stage === 'FINAL_SIGNAL') {
+        funnel.finalSignals++;
+      }
+
+      // Rejection reason histogram tracking
+      const rejCode = evaluation.rejectionCode || evaluation.rejectionReasonCode;
+      if (rejCode) {
+        rejectionHistogram[rejCode] = (rejectionHistogram[rejCode] || 0) + 1;
+      }
+
+      // Quality score distribution tracking
+      const q = evaluation.setupQuality;
+      let qBucket = '0-20';
+      if (q >= 90) qBucket = '90-100';
+      else if (q >= 80) qBucket = '80-90';
+      else if (q >= 70) qBucket = '70-80';
+      else if (q >= 60) qBucket = '60-70';
+      else if (q >= 40) qBucket = '40-60';
+      else if (q >= 20) qBucket = '20-40';
+      qualityDistribution[qBucket].evaluatedBars++;
+
+      // Trigger new trade if flat
+      if (
+        activeTrade === null &&
+        pendingSignal === null &&
+        (evaluation.direction === 'LONG' || evaluation.direction === 'SHORT') &&
+        (evaluation.setupState === 'CONFIRMED' || evaluation.setupState === 'ACTIVE') &&
+        evaluation.tradePlan !== null
+      ) {
+        totalSignalsGenerated++;
+        pendingSignal = evaluation;
+        pendingSignalBarIndex = t;
       }
     }
 
     // Calculate aggregated metrics
-    return this.buildSummary(config, filteredCandles.length, totalSignalsGenerated, trades, equityCurve, currentEquity, maxDrawdownUsd, maxDrawdownPercent);
+    return this.buildSummary(
+      config,
+      filteredCandles.length,
+      totalSignalsGenerated,
+      trades,
+      equityCurve,
+      currentEquity,
+      maxDrawdownUsd,
+      maxDrawdownPercent,
+      qualityAudit,
+      regimeCounts,
+      funnel,
+      rejectionHistogram,
+      qualityDistribution
+    );
   }
 
   /**
@@ -464,7 +597,12 @@ export class HistoricalReplayEngine {
     equityCurve: EquityPoint[],
     finalBalance: number,
     maxDrawdownUsd: number,
-    maxDrawdownPercent: number
+    maxDrawdownPercent: number,
+    qualityAudit?: DataQualityReport,
+    regimeCounts: Record<string, number> = {},
+    rejectionFunnel?: ReplaySummary['rejectionFunnel'],
+    rejectionHistogram?: Record<string, number>,
+    rawQualityDist?: Record<string, { evaluatedBars: number; trades: number; wins: number; totalR: number }>
   ): ReplaySummary {
     const totalTrades = trades.length;
     const longTrades = trades.filter((t) => t.direction === 'LONG');
@@ -560,12 +698,39 @@ export class HistoricalReplayEngine {
     const longMetrics = this.computeSingleMetricGroup(longTrades);
     const shortMetrics = this.computeSingleMetricGroup(shortTrades);
 
+    // Regime Coverage
+    const totalBarsEvaluated = Object.values(regimeCounts).reduce((a, b) => a + b, 0);
+    const regimeCoverage: Record<string, { count: number; percentage: number }> = {};
+    for (const [reg, count] of Object.entries(regimeCounts)) {
+      regimeCoverage[reg] = {
+        count,
+        percentage: totalBarsEvaluated > 0 ? Math.round((count / totalBarsEvaluated) * 10000) / 100 : 0,
+      };
+    }
+
+    // Quality Distribution
+    const qualityDistribution: Record<string, { evaluatedBars: number; trades: number; winRate: number; avgR: number }> = {};
+    if (rawQualityDist) {
+      for (const [bucket, d] of Object.entries(rawQualityDist)) {
+        qualityDistribution[bucket] = {
+          evaluatedBars: d.evaluatedBars,
+          trades: d.trades,
+          winRate: d.trades > 0 ? Math.round((d.wins / d.trades) * 10000) / 100 : 0,
+          avgR: d.trades > 0 ? Math.round((d.totalR / d.trades) * 100) / 100 : 0,
+        };
+      }
+    }
+
     const limitations: string[] = [
       'Историческая доходность не гарантирует будущих результатов.',
       `Использовано консервативное правило коллизий: ${config.collisionRule}. При касании SL и TP на одной свече позиция считается закрытой по стоп-лоссу.`,
       `Учтены торговые издержки: комиссии ${config.feesBps} bps, проскальзывание ${config.slippageBps} bps на вход и выход.`,
       totalTrades < 30 ? 'ВНИМАНИЕ: Размер выборки < 30 сделок, статистическая значимость ограничена.' : 'Статистическая выборка достаточна для предварительной оценки.',
     ];
+
+    if (qualityAudit && qualityAudit.status === 'DATASET_INVALID') {
+      limitations.push(`АУДИТ ДАННЫХ: Обнаружены проблемы с качеством данных (покрытие ${qualityAudit.coveragePercent}%, пропусков: ${qualityAudit.timestampGapsCount}).`);
+    }
 
     return {
       config,
@@ -607,6 +772,11 @@ export class HistoricalReplayEngine {
       },
       collisionRuleUsed: config.collisionRule,
       limitations,
+      dataQuality: qualityAudit,
+      regimeCoverage,
+      rejectionFunnel,
+      rejectionHistogram,
+      qualityDistribution,
     };
   }
 
@@ -688,7 +858,11 @@ export class HistoricalReplayEngine {
     };
   }
 
-  private static createInsufficientDataSummary(config: Required<ReplayConfig>, candleCount: number): ReplaySummary {
+  private static createInsufficientDataSummary(
+    config: Required<ReplayConfig>,
+    candleCount: number,
+    qualityAudit?: DataQualityReport
+  ): ReplaySummary {
     return {
       config,
       status: 'INSUFFICIENT_DATA',
@@ -735,6 +909,7 @@ export class HistoricalReplayEngine {
       },
       collisionRuleUsed: config.collisionRule,
       limitations: ['Недостаточно исторических данных для проведения достоверного бэктеста (требуется >= 35 свечей).'],
+      dataQuality: qualityAudit,
     };
   }
 }

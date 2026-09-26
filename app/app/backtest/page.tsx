@@ -75,6 +75,7 @@ export default function BacktestPage() {
   const monteCarlo = result?.monteCarlo;
   const sensitivity = result?.sensitivity;
   const calibration = result?.calibration;
+  const ablation = result?.ablation;
 
   return (
     <div className="min-h-screen bg-[#06090e] text-[#e1e7ec] flex flex-col font-mono text-xs">
@@ -416,6 +417,166 @@ export default function BacktestPage() {
                 </div>
               </div>
             </div>
+
+            {/* Phase 4: Signal Attribution, Rejection Funnel & Regime Coverage */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Rejection Funnel & Histogram */}
+              <div className="bg-[#0d131a] p-4 rounded-lg border border-[#1b2533]">
+                <div className="font-bold text-white uppercase tracking-wider mb-3 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <SlidersHorizontal className="w-4 h-4 text-cyan-400" />
+                    <span>Воронка отбора сигналов (Rejection Funnel)</span>
+                  </div>
+                  <span className="text-[10px] text-cyan-300 font-mono">
+                    Свечей: {replay.rejectionFunnel?.potentialBars || 0}
+                  </span>
+                </div>
+
+                {replay.rejectionFunnel && (
+                  <div className="space-y-2 mb-4 bg-[#080d12] p-3 rounded border border-[#17222e]">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-[#8899a6]">1. Потенциальные бары:</span>
+                      <span className="font-bold text-white">{replay.rejectionFunnel.potentialBars}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-[#8899a6]">2. Прошли структуру (Swing S/R):</span>
+                      <span className="font-bold text-blue-300">{replay.rejectionFunnel.structurePassed}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-[#8899a6]">3. Прошли режим рынка (Regime):</span>
+                      <span className="font-bold text-indigo-300">{replay.rejectionFunnel.regimePassed}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-[#8899a6]">4. Прошли MTF синхронизацию:</span>
+                      <span className="font-bold text-purple-300">{replay.rejectionFunnel.mtfPassed}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-[#8899a6]">5. Прошли риск-фильтры (R:R &gt;= 1.5, SL &lt;= 3.5 ATR):</span>
+                      <span className="font-bold text-amber-300">{replay.rejectionFunnel.riskPassed}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-[11px] border-t border-[#1a2636] pt-1 font-bold">
+                      <span className="text-emerald-400">6. Финальные подтверждённые сигналы:</span>
+                      <span className="text-emerald-400">{replay.rejectionFunnel.finalSignals}</span>
+                    </div>
+                  </div>
+                )}
+
+                <div className="text-[10px] uppercase font-bold text-[#8899a6] mb-2">Причины отклонения сетапов:</div>
+                <div className="grid grid-cols-2 gap-1.5 text-[10px]">
+                  {replay.rejectionHistogram && Object.entries(replay.rejectionHistogram).map(([code, count]: [string, any]) => (
+                    <div key={code} className="bg-[#101721] p-1.5 rounded flex justify-between items-center border border-[#182330]">
+                      <span className="text-[#778899] truncate mr-1">{code}</span>
+                      <span className="font-bold text-white">{count}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Data Quality & Market Regime Coverage */}
+              <div className="bg-[#0d131a] p-4 rounded-lg border border-[#1b2533]">
+                <div className="font-bold text-white uppercase tracking-wider mb-3 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                    <span>Аудит качества датасета & Покрытие режимов</span>
+                  </div>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${replay.dataQuality?.status === 'DATASET_VALID' ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/40' : 'bg-red-950 text-red-300 border border-red-500/40'}`}>
+                    {replay.dataQuality?.status || 'VALID'}
+                  </span>
+                </div>
+
+                {replay.dataQuality && (
+                  <div className="grid grid-cols-4 gap-2 text-center bg-[#080d12] p-2.5 rounded border border-[#17222e] mb-4">
+                    <div>
+                      <div className="text-[#667788] text-[9px]">Покрытие</div>
+                      <div className="text-xs font-bold text-emerald-400 mt-0.5">{replay.dataQuality.coveragePercent}%</div>
+                    </div>
+                    <div>
+                      <div className="text-[#667788] text-[9px]">Пропусков</div>
+                      <div className="text-xs font-bold text-white mt-0.5">{replay.dataQuality.timestampGapsCount}</div>
+                    </div>
+                    <div>
+                      <div className="text-[#667788] text-[9px]">Дубликатов</div>
+                      <div className="text-xs font-bold text-white mt-0.5">{replay.dataQuality.duplicateCount}</div>
+                    </div>
+                    <div>
+                      <div className="text-[#667788] text-[9px]">OHLC ошибок</div>
+                      <div className="text-xs font-bold text-white mt-0.5">{replay.dataQuality.ohlcViolationCount}</div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="text-[10px] uppercase font-bold text-[#8899a6] mb-2">Распределение рыночных режимов:</div>
+                <div className="space-y-1.5">
+                  {replay.regimeCoverage && Object.entries(replay.regimeCoverage).map(([reg, item]: [string, any]) => (
+                    <div key={reg} className="text-[10px] flex items-center justify-between bg-[#101721] p-1.5 rounded border border-[#182330]">
+                      <span className="text-white font-bold">{reg}</span>
+                      <span className="text-[#8899a6]">{item.count} свечей ({item.percentage}%)</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Phase 4: Filter Ablation Analysis Table */}
+            {ablation && (
+              <div className="bg-[#0d131a] p-4 rounded-lg border border-[#1b2533]">
+                <div className="font-bold text-white uppercase tracking-wider mb-2 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Scale className="w-4 h-4 text-cyan-400" />
+                    <span>Filter Ablation Analysis (Маржинальная полезность фильтров)</span>
+                  </div>
+                  <span className="text-[10px] text-[#8899a6]">
+                    Baseline vs Scenarios
+                  </span>
+                </div>
+                <div className="text-[11px] text-[#8899a6] mb-3">
+                  {ablation.summaryConclusion}
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="text-[10px] text-[#8899a6] border-b border-[#1b2533]">
+                        <th className="pb-2">Сценарий</th>
+                        <th className="pb-2">Отключённый фильтр</th>
+                        <th className="pb-2">Сигналов</th>
+                        <th className="pb-2">Сделок</th>
+                        <th className="pb-2">Win Rate</th>
+                        <th className="pb-2">Expectancy</th>
+                        <th className="pb-2">Profit Factor</th>
+                        <th className="pb-2">Max DD</th>
+                        <th className="pb-2">Вердикт</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#141d27]">
+                      {ablation.scenarios.map((sc: any) => (
+                        <tr key={sc.scenarioId} className="hover:bg-[#121a24]">
+                          <td className="py-2 text-white font-bold">{sc.name}</td>
+                          <td className="py-2 text-[#8899a6]">{sc.filterDisabled}</td>
+                          <td className="py-2 font-mono text-cyan-300">{sc.signalsCount}</td>
+                          <td className="py-2 font-mono">{sc.tradesCount}</td>
+                          <td className="py-2 font-mono">{sc.winRate}%</td>
+                          <td className="py-2 font-mono font-bold">{sc.expectancyR > 0 ? `+${sc.expectancyR}` : sc.expectancyR} R</td>
+                          <td className="py-2 font-mono">{sc.profitFactor}</td>
+                          <td className="py-2 font-mono text-red-400">-{sc.maxDrawdownPercent}%</td>
+                          <td className="py-2">
+                            <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                              sc.verdict === 'CRITICAL_PROTECTOR'
+                                ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/40'
+                                : sc.verdict === 'HARMFUL_DRAG'
+                                ? 'bg-red-950 text-red-300 border border-red-500/40'
+                                : 'bg-slate-900 text-slate-300 border border-slate-700'
+                            }`}>
+                              {sc.verdict}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
 
             {/* Walk Forward & Monte Carlo Section */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

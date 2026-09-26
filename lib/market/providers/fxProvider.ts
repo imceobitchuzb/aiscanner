@@ -157,13 +157,13 @@ export class FxMarketDataProvider implements IMarketDataProvider {
     const yahooSymbol = `${meta.baseCurrency}${meta.quoteCurrency}=X`;
 
     let interval = '1h';
-    let range = '1mo';
+    let range = limit > 500 ? '730d' : '1y';
     if (timeframe === '15m' || timeframe === '5m') {
       interval = '15m';
-      range = '5d';
+      range = limit > 300 ? '60d' : '30d';
     } else if (timeframe === '1D') {
       interval = '1d';
-      range = '6mo';
+      range = limit > 500 ? '5y' : '2y';
     }
 
     try {

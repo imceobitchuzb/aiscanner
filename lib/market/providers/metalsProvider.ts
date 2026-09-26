@@ -31,17 +31,17 @@ export class MetalsMarketDataProvider implements IMarketDataProvider {
     return 'OPEN';
   }
 
-  private tfToYahooInterval(tf: Timeframe): { interval: string; range: string } {
+  private tfToYahooInterval(tf: Timeframe, limit = 120): { interval: string; range: string } {
     switch (tf) {
-      case '1m': return { interval: '1m', range: '1d' };
-      case '5m': return { interval: '5m', range: '1d' };
-      case '15m': return { interval: '15m', range: '5d' };
-      case '30m': return { interval: '30m', range: '5d' };
-      case '1h': return { interval: '1h', range: '1mo' };
-      case '4h': return { interval: '1h', range: '1mo' };
-      case '1D': return { interval: '1d', range: '6mo' };
-      case '1W': return { interval: '1wk', range: '1y' };
-      default: return { interval: '1h', range: '1mo' };
+      case '1m': return { interval: '1m', range: '7d' };
+      case '5m': return { interval: '5m', range: limit > 300 ? '60d' : '7d' };
+      case '15m': return { interval: '15m', range: limit > 300 ? '60d' : '30d' };
+      case '30m': return { interval: '30m', range: limit > 300 ? '60d' : '30d' };
+      case '1h': return { interval: '1h', range: limit > 500 ? '730d' : '1y' };
+      case '4h': return { interval: '1h', range: limit > 500 ? '730d' : '1y' };
+      case '1D': return { interval: '1d', range: limit > 500 ? '5y' : '2y' };
+      case '1W': return { interval: '1wk', range: '5y' };
+      default: return { interval: '1h', range: '1y' };
     }
   }
 
@@ -232,7 +232,7 @@ export class MetalsMarketDataProvider implements IMarketDataProvider {
   }
 
   async getCandles(symbol: string, timeframe: Timeframe, limit = 120): Promise<CandleWithProvenance[]> {
-    const { interval, range } = this.tfToYahooInterval(timeframe);
+    const { interval, range } = this.tfToYahooInterval(timeframe, limit);
 
     // Primary: COMEX Gold Futures GC=F
     try {

@@ -108,24 +108,49 @@ export class CryptoMarketDataProvider implements IMarketDataProvider {
     const interval = this.tfToBinance(timeframe);
 
     try {
-      const url = `https://api.binance.com/api/v3/klines?symbol=${upper}&interval=${interval}&limit=${limit}`;
-      const res = await fetch(url, {
-        next: { revalidate: 5 },
-        signal: AbortSignal.timeout(6000),
-      });
+      let allKlines: (string | number)[][] = [];
+      let endTimeParam = '';
+      const targetLimit = Math.min(3000, Math.max(10, limit));
 
-      if (!res.ok) throw new Error(`Binance klines HTTP ${res.status}`);
-      const rawData = await res.json();
+      while (allKlines.length < targetLimit) {
+        const batchLimit = Math.min(1000, targetLimit - allKlines.length);
+        const url = `https://api.binance.com/api/v3/klines?symbol=${upper}&interval=${interval}&limit=${batchLimit}${endTimeParam}`;
+        const res = await fetch(url, {
+          next: { revalidate: 5 },
+          signal: AbortSignal.timeout(6000),
+        });
 
-      return rawData.map((k: (string | number)[]) => ({
-        time: Math.floor(Number(k[0]) / 1000),
-        open: parseFloat(k[1] as string),
-        high: parseFloat(k[2] as string),
-        low: parseFloat(k[3] as string),
-        close: parseFloat(k[4] as string),
-        volume: parseFloat(k[5] as string),
-        source: 'BINANCE_SPOT',
-      }));
+        if (!res.ok) break;
+        const rawData: (string | number)[][] = await res.json();
+        if (!rawData || rawData.length === 0) break;
+
+        // Prepend earlier batch to maintain chronological order
+        allKlines = [...rawData, ...allKlines];
+        if (rawData.length < batchLimit || allKlines.length >= targetLimit) break;
+
+        const earliestOpenTime = Number(rawData[0][0]);
+        endTimeParam = `&endTime=${earliestOpenTime - 1}`;
+      }
+
+      // Deduplicate and sort ascending by timestamp
+      const uniqueMap = new Map<number, CandleWithProvenance>();
+      for (const k of allKlines) {
+        const timeSec = Math.floor(Number(k[0]) / 1000);
+        if (!uniqueMap.has(timeSec)) {
+          uniqueMap.set(timeSec, {
+            time: timeSec,
+            open: parseFloat(k[1] as string),
+            high: parseFloat(k[2] as string),
+            low: parseFloat(k[3] as string),
+            close: parseFloat(k[4] as string),
+            volume: parseFloat(k[5] as string),
+            source: 'BINANCE_SPOT',
+          });
+        }
+      }
+
+      const sorted = Array.from(uniqueMap.values()).sort((a, b) => a.time - b.time);
+      return sorted.slice(-targetLimit);
     } catch (err) {
       this.errorCount++;
       throw new Error(`[CryptoMarketDataProvider] Failed to fetch candles for ${upper}: ${(err as Error).message}`);

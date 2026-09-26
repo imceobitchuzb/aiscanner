@@ -6,6 +6,7 @@ import { WalkForwardEngine } from '@/lib/quant/walkForwardEngine';
 import { MonteCarloEngine } from '@/lib/quant/monteCarloEngine';
 import { ParameterSensitivityEngine } from '@/lib/quant/parameterSensitivity';
 import { ConfidenceCalibrationEngine } from '@/lib/quant/confidenceCalibration';
+import { FilterAblationEngine } from '@/lib/quant/filterAblationEngine';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -15,7 +16,7 @@ export async function POST(request: Request) {
     const body = await request.json();
     const asset = (body.asset || 'BTCUSDT').toUpperCase();
     const timeframe = (body.timeframe as Timeframe) || '1h';
-    const limit = Math.min(1000, Math.max(50, Number(body.limit) || 300));
+    const limit = Math.min(3000, Math.max(50, Number(body.limit) || 500));
 
     const config: ReplayConfig = {
       asset,
@@ -59,6 +60,9 @@ export async function POST(request: Request) {
     // 6. Run Confidence Calibration
     const calibration = ConfidenceCalibrationEngine.evaluate(replaySummary.trades);
 
+    // 7. Run Filter Ablation Engine (Marginal utility of filters)
+    const ablation = FilterAblationEngine.runAblation(candles, config);
+
     return NextResponse.json({
       status: 'SUCCESS',
       asset,
@@ -69,6 +73,7 @@ export async function POST(request: Request) {
       monteCarlo,
       sensitivity,
       calibration,
+      ablation,
     }, {
       headers: {
         'Cache-Control': 'no-store, max-age=0',
