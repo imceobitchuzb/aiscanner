@@ -26,6 +26,11 @@ interface HeaderProps {
   watchlist: Asset[];
   isLiveFeed: boolean;
   isWsConnected?: boolean;
+  dataSource?: string;
+  latencyMs?: number;
+  marketStatus?: string;
+  freshness?: string;
+  spread?: number;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -34,6 +39,11 @@ export const Header: React.FC<HeaderProps> = ({
   watchlist,
   isLiveFeed,
   isWsConnected = true,
+  dataSource = 'LIVE_FEED',
+  latencyMs = 0,
+  marketStatus = 'OPEN',
+  freshness = 'LIVE',
+  spread,
 }) => {
   const pathname = usePathname();
   const [timeStr, setTimeStr] = useState<string>('');
@@ -94,7 +104,12 @@ export const Header: React.FC<HeaderProps> = ({
                 }`}
               >
                 <span className="font-bold text-slate-200">{asset.symbol}</span>
-                <span className="text-slate-100">${asset.price.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+                <span className="text-slate-100">
+                  ${asset.price.toLocaleString(undefined, { 
+                    minimumFractionDigits: asset.category === 'FOREX' ? 4 : 2,
+                    maximumFractionDigits: asset.category === 'FOREX' ? 4 : 2 
+                  })}
+                </span>
                 <span className={`font-bold ${isUp ? 'text-emerald-400' : 'text-rose-400'}`}>
                   {isUp ? '↗ +' : '↘ '}{asset.change24h}%
                 </span>
@@ -103,15 +118,25 @@ export const Header: React.FC<HeaderProps> = ({
           })}
         </div>
 
-        <div className="flex items-center gap-3 text-slate-400 shrink-0 pl-2">
-          {/* Live Stream Status Badge */}
+        <div className="flex items-center gap-2.5 text-slate-400 shrink-0 pl-2">
+          {/* Data Provenance & Freshness Badge */}
           <div className={`px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1.5 border ${
-            isLiveFeed 
+            freshness === 'LIVE'
               ? 'bg-emerald-950/50 text-emerald-300 border-emerald-600/70 shadow-bull-glow'
-              : 'bg-amber-950/40 text-amber-300 border-amber-800/60'
+              : freshness === 'RECENT'
+              ? 'bg-cyan-950/50 text-cyan-300 border-cyan-700/60'
+              : freshness === 'STALE'
+              ? 'bg-amber-950/50 text-amber-300 border-amber-700/60'
+              : 'bg-rose-950/50 text-rose-300 border-rose-700/60'
           }`}>
-            <span className={`h-2 w-2 rounded-full ${isLiveFeed ? 'bg-emerald-400 animate-ping' : 'bg-amber-400'}`} />
-            {isLiveFeed ? 'ПРЯМОЙ РЫНОК 24/7 (BINANCE WEBSOCKET)' : 'БАЗОВЫЙ СИНТЕТИЧЕСКИЙ РЕЖИМ'}
+            <span className={`h-2 w-2 rounded-full ${
+              freshness === 'LIVE' ? 'bg-emerald-400 animate-ping' : freshness === 'RECENT' ? 'bg-cyan-400' : 'bg-amber-400'
+            }`} />
+            <span>
+              {freshness} • {dataSource} {latencyMs > 0 ? `(${latencyMs}ms)` : ''}
+              {marketStatus !== 'OPEN' ? ` • ${marketStatus === 'CLOSED' ? 'РЫНОК ЗАКРЫТ' : marketStatus}` : ''}
+              {spread ? ` • СПРЕД: $${spread}` : ''}
+            </span>
           </div>
 
           <span className="text-slate-300 font-tabular font-bold">{timeStr}</span>

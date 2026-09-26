@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { marketProvider } from '@/lib/providers/binanceProvider';
+import { marketService } from '@/lib/market/marketService';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -10,12 +10,33 @@ export async function GET(request: Request) {
 
   try {
     if (symbol) {
-      const asset = await marketProvider.getAsset(symbol);
-      return NextResponse.json(asset);
+      const quote = await marketService.getQuote(symbol);
+      return NextResponse.json(quote, {
+        headers: {
+          'Cache-Control': 'no-store, max-age=0',
+          'X-Data-Source': quote.source,
+          'X-Market-Status': quote.marketStatus,
+          'X-Data-Freshness': quote.freshness,
+        },
+      });
     }
-    const watchlist = await marketProvider.getWatchlist();
-    return NextResponse.json(watchlist);
+
+    const watchlist = await marketService.getWatchlist();
+    return NextResponse.json(watchlist, {
+      headers: {
+        'Cache-Control': 'no-store, max-age=0',
+      },
+    });
   } catch (error) {
-    return NextResponse.json({ error: 'Failed to retrieve market data' }, { status: 500 });
+    return NextResponse.json(
+      {
+        error: 'Failed to retrieve market data',
+        details: (error as Error).message,
+        source: 'DATA_SERVICE_ERROR',
+        marketStatus: 'HALTED',
+        freshness: 'OFFLINE',
+      },
+      { status: 500 }
+    );
   }
 }

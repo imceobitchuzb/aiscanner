@@ -10,10 +10,10 @@ export function runMonteCarloSimulation(
     return {
       iterations,
       probabilityOfRuin: 0,
-      expectedMaxDrawdown: 5.0,
-      p5TerminalEquity: initialBalance * 0.95,
-      p50TerminalEquity: initialBalance * 1.15,
-      p95TerminalEquity: initialBalance * 1.45,
+      expectedMaxDrawdown: 0,
+      p5TerminalEquity: initialBalance,
+      p50TerminalEquity: initialBalance,
+      p95TerminalEquity: initialBalance,
       samplePaths: [],
     };
   }

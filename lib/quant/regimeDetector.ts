@@ -2,19 +2,19 @@ import { Candle, MarketRegimeState, MarketRegimeType } from '../types';
 import { calculateADX, calculateATR, calculateBollingerBands, calculateEMA } from './indicators';
 
 export function detectMarketRegime(candles: Candle[]): MarketRegimeState {
-  if (candles.length < 30) {
+  if (!candles || candles.length < 30) {
     return {
       regime: 'UNCERTAIN',
-      confidence: 45,
-      durationHours: 6,
+      confidence: 0,
+      durationHours: 0,
       stability: 'LOW',
       transitionRisk: 'HIGH',
       transitionProbabilities: [
-        { targetRegime: 'RANGE', probability: 40 },
-        { targetRegime: 'TRENDING_BULL', probability: 30 },
-        { targetRegime: 'TRENDING_BEAR', probability: 30 },
+        { targetRegime: 'RANGE', probability: 34 },
+        { targetRegime: 'TRENDING_BULL', probability: 33 },
+        { targetRegime: 'TRENDING_BEAR', probability: 33 },
       ],
-      explanation: 'Insufficient candle sample to establish high-confidence statistical regime boundary.',
+      explanation: 'Недостаточно исторических свечей для достоверной статистической классификации рыночного режима (требуется минимум 30 свечей).',
     };
   }
 

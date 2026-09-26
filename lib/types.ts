@@ -1,4 +1,4 @@
-export type AssetCategory = 'CRYPTO' | 'FOREX' | 'COMMODITIES' | 'EQUITIES';
+export type AssetCategory = 'CRYPTO' | 'FOREX' | 'METALS' | 'COMMODITIES' | 'EQUITIES' | 'INDICES';
 
 export interface Asset {
   symbol: string;
@@ -13,6 +13,13 @@ export interface Asset {
   regime: MarketRegimeType;
   signalState: 'LONG' | 'SHORT' | 'NEUTRAL';
   isLiveSupported: boolean;
+  source?: string;
+  bid?: number;
+  ask?: number;
+  spread?: number;
+  marketStatus?: 'OPEN' | 'CLOSED' | 'PRE_MARKET' | 'POST_MARKET' | 'HALTED';
+  freshness?: 'LIVE' | 'RECENT' | 'STALE' | 'OFFLINE';
+  latencyMs?: number;
 }
 
 export interface Candle {
@@ -266,5 +273,6 @@ export interface WalkForwardResult {
   degradationPercent: number;
   inSampleWinRate: number;
   outOfSampleWinRate: number;
-  robustnessGrade: 'ROBUST' | 'MODERATE' | 'OVERFITTED';
+  robustnessGrade: 'ROBUST' | 'MODERATE' | 'OVERFITTED' | 'INSUFFICIENT_DATA';
 }
+

@@ -20,14 +20,14 @@ export const Watchlist: React.FC<WatchlistProps> = ({
   const categories: { label: string; value: string }[] = [
     { label: 'ВСЕ', value: 'ALL' },
     { label: 'КРИПТА', value: 'CRYPTO' },
+    { label: 'МЕТАЛЛЫ', value: 'METALS' },
     { label: 'ВАЛЮТЫ', value: 'FOREX' },
     { label: 'АКЦИИ', value: 'EQUITIES' },
-    { label: 'МЕТАЛЛЫ', value: 'COMMODITIES' },
   ];
 
   const filtered = activeCategory === 'ALL'
     ? assets
-    : assets.filter((a) => a.category === activeCategory);
+    : assets.filter((a) => a.category === activeCategory || (activeCategory === 'METALS' && (a.category === 'METALS' || a.category === 'COMMODITIES')));
 
   const getRegimeLabel = (regime: string) => {
     switch (regime) {

@@ -6,14 +6,14 @@ export function runWalkForwardAnalysis(
   config: BacktestStrategyConfig,
   splitRatio = 0.7
 ): WalkForwardResult {
-  if (candles.length < 80) {
+  if (!candles || candles.length < 80) {
     return {
-      inSampleSharpe: 1.82,
-      outOfSampleSharpe: 1.48,
-      degradationPercent: 18.7,
-      inSampleWinRate: 64.2,
-      outOfSampleWinRate: 58.5,
-      robustnessGrade: 'ROBUST',
+      inSampleSharpe: 0,
+      outOfSampleSharpe: 0,
+      degradationPercent: 0,
+      inSampleWinRate: 0,
+      outOfSampleWinRate: 0,
+      robustnessGrade: 'INSUFFICIENT_DATA',
     };
   }
 
@@ -24,16 +24,19 @@ export function runWalkForwardAnalysis(
   const inSampleReport = runBacktest(inSampleCandles, config);
   const outOfSampleReport = runBacktest(outOfSampleCandles, config);
 
-  const inSharpe = inSampleReport.sharpeRatio || 1.6;
-  const outSharpe = outOfSampleReport.sharpeRatio || 1.2;
+  const inSharpe = inSampleReport.sharpeRatio || 0;
+  const outSharpe = outOfSampleReport.sharpeRatio || 0;
 
-  // Degradation calculation
-  const degradation = inSharpe > 0
-    ? Math.round(((inSharpe - outSharpe) / inSharpe) * 1000) / 10
-    : 0;
+  // Real statistical degradation calculation
+  let degradation = 0;
+  if (inSharpe > 0) {
+    degradation = Math.round(((inSharpe - outSharpe) / inSharpe) * 1000) / 10;
+  }
 
   let robustnessGrade: WalkForwardResult['robustnessGrade'] = 'ROBUST';
-  if (degradation > 45 || outSharpe < 0.5) {
+  if (inSharpe === 0 && outSharpe === 0) {
+    robustnessGrade = 'INSUFFICIENT_DATA';
+  } else if (degradation > 45 || outSharpe < 0.5) {
     robustnessGrade = 'OVERFITTED';
   } else if (degradation > 25) {
     robustnessGrade = 'MODERATE';
