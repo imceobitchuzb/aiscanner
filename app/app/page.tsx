@@ -19,7 +19,8 @@ import { Asset, Candle, NewsItem, Timeframe } from '@/lib/types';
 import { DEFAULT_ASSETS } from '@/lib/providers/demoProvider';
 import { clientMarketProvider } from '@/lib/providers/clientMarketProvider';
 import { newsProvider, MACRO_NEWS_EVENTS } from '@/lib/providers/newsProvider';
-import { useBinanceLiveStream } from '@/lib/useBinanceLiveStream';
+import { useMarketStream } from '@/lib/market/useMarketStream';
+import { QuoteWithProvenance } from '@/lib/market/types';
 
 import { getIndicatorSnapshot } from '@/lib/quant/indicators';
 import { detectMarketStructure } from '@/lib/quant/marketStructure';
@@ -36,17 +37,15 @@ export default function TerminalPage() {
   const [watchlist, setWatchlist] = useState<Asset[]>(DEFAULT_ASSETS);
   const [candles, setCandles] = useState<Candle[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
-  const [isLiveFeed, setIsLiveFeed] = useState<boolean>(true);
   const [news, setNews] = useState<NewsItem[]>(MACRO_NEWS_EVENTS);
 
-  // Live WebSocket Tick Handler
+  // Live Multi-Asset Tick & Quote Handler
   const handleCandleTick = useCallback((newTickCandle: Candle) => {
     setCandles((prevCandles) => {
       if (prevCandles.length === 0) return [newTickCandle];
       const lastCandle = prevCandles[prevCandles.length - 1];
 
       if (newTickCandle.time === lastCandle.time) {
-        // Update in-flight active candle
         const updated = [...prevCandles];
         updated[updated.length - 1] = {
           ...lastCandle,
@@ -57,13 +56,11 @@ export default function TerminalPage() {
         };
         return updated;
       } else if (newTickCandle.time > lastCandle.time) {
-        // New candle formed
         return [...prevCandles.slice(1), newTickCandle];
       }
       return prevCandles;
     });
 
-    // Update watchlist price in real time
     setWatchlist((prevWatchlist) =>
       prevWatchlist.map((asset) =>
         asset.symbol === currentSymbol
@@ -78,11 +75,43 @@ export default function TerminalPage() {
     );
   }, [currentSymbol]);
 
-  // Hook up 24/7 Binance WebSocket
-  const { isConnected: isWsConnected, lastTickTime } = useBinanceLiveStream({
+  const handleQuoteUpdate = useCallback((q: QuoteWithProvenance) => {
+    setWatchlist((prevWatchlist) =>
+      prevWatchlist.map((asset) =>
+        asset.symbol === q.symbol
+          ? {
+              ...asset,
+              price: q.price,
+              change24h: q.change24h,
+              high24h: q.high24h,
+              low24h: q.low24h,
+              source: q.source,
+              bid: q.bid,
+              ask: q.ask,
+              spread: q.spread,
+              marketStatus: q.marketStatus,
+              freshness: q.freshness,
+              latencyMs: q.latencyMs,
+            }
+          : asset
+      )
+    );
+  }, []);
+
+  // Multi-asset Stream Hook (WebSocket for Crypto, Polling REST for Metals/FX/Equities)
+  const {
+    isConnected: isWsConnected,
+    lastTickTime,
+    freshness,
+    source: dataSource,
+    marketStatus,
+    latencyMs,
+    spread,
+  } = useMarketStream({
     symbol: currentSymbol,
     timeframe,
     onCandleTick: handleCandleTick,
+    onQuoteUpdate: handleQuoteUpdate,
   });
 
   // Fetch Watchlist via Server Proxy
@@ -110,8 +139,6 @@ export default function TerminalPage() {
         const c = await clientMarketProvider.getCandles(currentSymbol, timeframe, 120);
         if (isMounted) {
           setCandles(c);
-          const isCrypto = currentSymbol.endsWith('USDT') || currentSymbol.endsWith('BTC');
-          setIsLiveFeed(isCrypto);
           setLoading(false);
         }
       } catch (err) {
@@ -150,8 +177,13 @@ export default function TerminalPage() {
         currentSymbol={currentSymbol}
         onSelectSymbol={setCurrentSymbol}
         watchlist={watchlist}
-        isLiveFeed={isLiveFeed}
+        isLiveFeed={freshness === 'LIVE' || freshness === 'RECENT'}
         isWsConnected={isWsConnected}
+        dataSource={dataSource}
+        latencyMs={latencyMs}
+        marketStatus={marketStatus}
+        freshness={freshness}
+        spread={spread ?? undefined}
       />
 
       {/* Main Terminal Workspace */}
@@ -215,7 +247,7 @@ export default function TerminalPage() {
           {/* Model Transparency Row */}
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
             <div className="xl:col-span-2">
-              <ModelTransparency confidence={signal.confidence} isLive={isLiveFeed} />
+              <ModelTransparency confidence={signal.confidence} isLive={freshness === 'LIVE' || freshness === 'RECENT'} />
             </div>
 
             {/* Quick Instrument Stat Card */}
