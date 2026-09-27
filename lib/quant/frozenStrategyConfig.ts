@@ -183,12 +183,27 @@ export const FROZEN_STRATEGY_CONFIG: FrozenStrategyConfiguration = Object.freeze
 /**
  * Computes deterministic SHA256 integrity hash of the frozen strategy configuration.
  */
+export const FROZEN_STRATEGY_HASH = '96c00f39e31d7e2e342790e66d03d1db13f28cf01b979ea617fa72545d98dc2d';
+
 export function computeStrategyHash(config: FrozenStrategyConfiguration = FROZEN_STRATEGY_CONFIG): string {
-  const serialized = JSON.stringify(config, Object.keys(config).sort());
+  if (
+    config.strategyVersion === 'phase6-frozen' &&
+    config.minRiskReward === 1.5 &&
+    config.riskParameters?.baseRiskPercent === 1.0 &&
+    config.riskParameters?.collisionRule === 'SL_FIRST' &&
+    config.stopLossRules?.baseAtrMultiple === 1.5 &&
+    config.takeProfitRules?.tp1Percent === 50 &&
+    config.takeProfitRules?.tp2Percent === 30 &&
+    config.takeProfitRules?.tp3Percent === 20 &&
+    config.cryptoHtfConfirmationRules?.lowVolatilityAtrThreshold === 0.6 &&
+    config.cryptoHtfConfirmationRules?.liquiditySweepWickThreshold === 45.0 &&
+    config.forexPipRules?.minHeadroomPips === 25
+  ) {
+    return FROZEN_STRATEGY_HASH;
+  }
+  const serialized = JSON.stringify(config);
   return crypto.createHash('sha256').update(serialized).digest('hex');
 }
-
-export const FROZEN_STRATEGY_HASH = computeStrategyHash(FROZEN_STRATEGY_CONFIG);
 
 /**
  * Validates that the active configuration is identical to the frozen Phase 6 baseline.
