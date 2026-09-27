@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { marketService } from '@/lib/market/marketService';
 import { Timeframe } from '@/lib/market/types';
-import { SignalDecisionEngine } from '@/lib/quant/signalDecisionEngine';
+import { AdaptiveSignalEngine } from '@/lib/quant/adaptiveSignalEngine';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -18,7 +18,7 @@ export async function GET(request: Request) {
     const isMarketOpen = quote.marketStatus === 'OPEN' || quote.marketStatus === 'PRE_MARKET' || quote.marketStatus === 'POST_MARKET';
     const isDataLive = quote.freshness === 'LIVE' || quote.freshness === 'RECENT';
 
-    const result = SignalDecisionEngine.evaluate(
+    const result = AdaptiveSignalEngine.evaluate(
       candles,
       symbol,
       timeframe,
@@ -45,10 +45,17 @@ export async function GET(request: Request) {
         grade: result.setupGrade,
       },
       tradePlan: result.tradePlan,
+      dynamicPlan: result.dynamicPlan,
+      positionSizing: result.positionSizing,
+      weightProfile: result.weightProfile,
+      conflictReport: result.conflictReport,
+      qualityBreakdown: result.qualityBreakdown,
       evidence: result.evidence,
       risks: result.riskWarnings,
       invalidation: result.invalidationCriteria,
       rejectionReason: result.rejectionReason,
+      whyThisSignal: result.whyThisSignal,
+      provenance: result.provenance,
     };
 
     return NextResponse.json(response, {

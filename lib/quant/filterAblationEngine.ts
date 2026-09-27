@@ -164,4 +164,123 @@ export class FilterAblationEngine {
       summaryConclusion,
     };
   }
+
+  /**
+   * Phase 5A Ablation: Compares Adaptive Engine Baseline with Static Fallbacks
+   * (Static Weights, Static MTF, Static SL/TP) and Core Risk Gates.
+   */
+  public static runPhase5Ablation(candles: Candle[], userConfig: ReplayConfig): FilterAblationReport {
+    const definitions: {
+      id: string;
+      name: string;
+      filterDisabled: string;
+      config: FilterAblationConfig;
+    }[] = [
+      {
+        id: 'adaptive_baseline',
+        name: 'Phase 5A Adaptive Baseline',
+        filterDisabled: 'None',
+        config: {},
+      },
+      {
+        id: 'static_weights',
+        name: 'Static Weights Fallback',
+        filterDisabled: 'Dynamic Regime-Aware Weighting',
+        config: { useStaticWeights: true },
+      },
+      {
+        id: 'static_mtf',
+        name: 'Static MTF Fallback',
+        filterDisabled: 'Hierarchical MTF Alignment Penalty',
+        config: { useStaticMtf: true },
+      },
+      {
+        id: 'static_sl',
+        name: 'Static Fixed Stop Loss',
+        filterDisabled: 'Dynamic Structural Regime Stop Loss',
+        config: { useStaticSl: true },
+      },
+      {
+        id: 'without_volatility',
+        name: 'Without Volatility Filter',
+        filterDisabled: 'Extreme Volatility Gate',
+        config: { skipVolatilityFilter: true },
+      },
+      {
+        id: 'without_rr',
+        name: 'Without R:R Gate',
+        filterDisabled: 'Minimum Risk/Reward Gate',
+        config: { skipRiskRewardFilter: true },
+      },
+    ];
+
+    const results: AblationScenarioResult[] = [];
+    let baselineResult: AblationScenarioResult | null = null;
+
+    for (const def of definitions) {
+      const replay = HistoricalReplayEngine.runReplay(candles, {
+        ...userConfig,
+        useAdaptiveEngine: true,
+        ablation: def.config,
+      });
+
+      const entry: AblationScenarioResult = {
+        scenarioId: def.id,
+        name: def.name,
+        filterDisabled: def.filterDisabled,
+        config: def.config,
+        signalsCount: replay.totalSignalsGenerated,
+        tradesCount: replay.totalTradesExecuted,
+        winRate: replay.winRate,
+        expectancyR: replay.expectancyR,
+        profitFactor: replay.profitFactor,
+        maxDrawdownPercent: replay.maxDrawdownPercent,
+        averageR: replay.averageR,
+        netPnlUsd: replay.netPnlUsd,
+        verdict: 'NEUTRAL_FILTER',
+        verdictReason: '',
+      };
+
+      if (def.id === 'adaptive_baseline') {
+        baselineResult = entry;
+      }
+      results.push(entry);
+    }
+
+    if (!baselineResult) {
+      throw new Error('Baseline scenario execution failed');
+    }
+
+    for (const res of results) {
+      if (res.scenarioId === 'adaptive_baseline') {
+        res.verdict = 'NEUTRAL_FILTER';
+        res.verdictReason = 'Эталонная адаптивная архитектура Phase 5A со всеми динамическими профилями.';
+        continue;
+      }
+
+      const ddDiff = res.maxDrawdownPercent - baselineResult.maxDrawdownPercent;
+      const expDiff = res.expectancyR - baselineResult.expectancyR;
+      const tradeCountDiff = res.tradesCount - baselineResult.tradesCount;
+
+      if (ddDiff > 3.0 || expDiff < -0.10) {
+        res.verdict = 'CRITICAL_PROTECTOR';
+        res.verdictReason = `Компонент защищает капитал: при откате к статике просадка выросла на +${ddDiff.toFixed(1)}% или матожидание упало на ${expDiff.toFixed(2)} R.`;
+      } else if (tradeCountDiff > 0 && expDiff > 0.05 && ddDiff <= 1.5) {
+        res.verdict = 'HARMFUL_DRAG';
+        res.verdictReason = `Компонент излишне строг: без него матожидание улучшилось на +${expDiff.toFixed(2)} R.`;
+      } else {
+        res.verdict = 'NEUTRAL_FILTER';
+        res.verdictReason = 'Компонент обеспечивает стабильность метрик на данном историческом участке.';
+      }
+    }
+
+    return {
+      asset: userConfig.asset,
+      timeframe: userConfig.timeframe,
+      totalCandles: candles.length,
+      baseline: baselineResult,
+      scenarios: results,
+      summaryConclusion: 'Phase 5A Adaptive Architecture Ablation Test completed.',
+    };
+  }
 }

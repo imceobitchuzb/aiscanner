@@ -10,6 +10,7 @@ import {
   SignalDecisionEngine,
   UnifiedSignalResult,
 } from './signalDecisionEngine';
+import { AdaptiveSignalEngine, AdaptiveSignalResult } from './adaptiveSignalEngine';
 
 export interface ReplayConfig {
   asset: string;
@@ -24,6 +25,7 @@ export interface ReplayConfig {
   startDate?: number;
   endDate?: number;
   ablation?: FilterAblationConfig;
+  useAdaptiveEngine?: boolean;
 }
 
 export type TradeOutcome = 'WIN' | 'LOSS' | 'TIMEOUT' | 'INVALIDATED';
@@ -161,6 +163,7 @@ export class HistoricalReplayEngine {
       startDate: userConfig.startDate ?? (candles.length > 0 ? candles[0].time : 0),
       endDate: userConfig.endDate ?? (candles.length > 0 ? candles[candles.length - 1].time : 0),
       ablation: userConfig.ablation ?? {},
+      useAdaptiveEngine: userConfig.useAdaptiveEngine ?? false,
     };
 
     // 1. Audit and clean dataset
@@ -214,6 +217,11 @@ export class HistoricalReplayEngine {
       invalidationPrice?: number;
       invalidationReason?: string;
       funnelStage?: FunnelStage;
+      trailingStrategy?: string;
+      trailingStepAtr?: number;
+      breakevenThresholdR?: number;
+      isBreakevenTriggered?: boolean;
+      extremePriceSinceEntry?: number;
     } | null = null;
 
     let pendingSignal: UnifiedSignalResult | null = null;
@@ -267,6 +275,39 @@ export class HistoricalReplayEngine {
           const adversePct = ((currentBar.high - activeTrade.entryPrice) / activeTrade.entryPrice) * 100;
           activeTrade.mfe = Math.max(activeTrade.mfe, favorablePct);
           activeTrade.mae = Math.max(activeTrade.mae, adversePct);
+        }
+
+        // Dynamic Breakeven & Trailing Logic (Phase 5A)
+        if (config.useAdaptiveEngine) {
+          if (isLong) {
+            activeTrade.extremePriceSinceEntry = Math.max(activeTrade.extremePriceSinceEntry || activeTrade.entryPrice, currentBar.high);
+            const favorableR = (activeTrade.extremePriceSinceEntry - activeTrade.entryPrice) / (activeTrade.initialRiskPerUnit || 1);
+            if (!activeTrade.isBreakevenTriggered && favorableR >= (activeTrade.breakevenThresholdR || 1.2)) {
+              activeTrade.isBreakevenTriggered = true;
+              activeTrade.stopLoss = Math.max(activeTrade.stopLoss, activeTrade.entryPrice);
+            }
+            if (activeTrade.trailingStrategy === 'STRUCTURE_TRAILING' || activeTrade.trailingStrategy === 'WIDE_VOLATILITY_TRAILING') {
+              const trailDist = (activeTrade.trailingStepAtr || 1.5) * (activeTrade.initialRiskPerUnit * 0.7);
+              const candidateSl = activeTrade.extremePriceSinceEntry - trailDist;
+              if (candidateSl > activeTrade.stopLoss) {
+                activeTrade.stopLoss = Math.round(candidateSl * 10000) / 10000;
+              }
+            }
+          } else {
+            activeTrade.extremePriceSinceEntry = Math.min(activeTrade.extremePriceSinceEntry || activeTrade.entryPrice, currentBar.low);
+            const favorableR = (activeTrade.entryPrice - activeTrade.extremePriceSinceEntry) / (activeTrade.initialRiskPerUnit || 1);
+            if (!activeTrade.isBreakevenTriggered && favorableR >= (activeTrade.breakevenThresholdR || 1.2)) {
+              activeTrade.isBreakevenTriggered = true;
+              activeTrade.stopLoss = Math.min(activeTrade.stopLoss, activeTrade.entryPrice);
+            }
+            if (activeTrade.trailingStrategy === 'STRUCTURE_TRAILING' || activeTrade.trailingStrategy === 'WIDE_VOLATILITY_TRAILING') {
+              const trailDist = (activeTrade.trailingStepAtr || 1.5) * (activeTrade.initialRiskPerUnit * 0.7);
+              const candidateSl = activeTrade.extremePriceSinceEntry + trailDist;
+              if (candidateSl < activeTrade.stopLoss) {
+                activeTrade.stopLoss = Math.round(candidateSl * 10000) / 10000;
+              }
+            }
+          }
         }
 
         // Check SL and TP hits
@@ -383,6 +424,11 @@ export class HistoricalReplayEngine {
           if (currentDdUsd > maxDrawdownUsd) maxDrawdownUsd = currentDdUsd;
           if (currentDdPct > maxDrawdownPercent) maxDrawdownPercent = currentDdPct;
 
+          // If stop loss trailed into profit or exited at breakeven with positive gain, classify outcome as WIN
+          if (outcome === 'LOSS' && rMultiple > 0.05 && netPnlUsd > 0) {
+            outcome = 'WIN';
+          }
+
           const completedTrade: ReplayedTrade = {
             tradeId: activeTrade.tradeId,
             signalId: activeTrade.signalId,
@@ -470,7 +516,14 @@ export class HistoricalReplayEngine {
           ? Math.max(0.0001, filledPrice - plan.stopLoss)
           : Math.max(0.0001, plan.stopLoss - filledPrice);
 
-        const riskAmountUsd = currentEquity * (config.riskPerTradePercent / 100);
+        const dynamicPlan = (pendingSignal as any).dynamicPlan;
+        const posSizing = (pendingSignal as any).positionSizing;
+
+        const effectiveRiskPct = config.useAdaptiveEngine && posSizing?.actualRiskPercent
+          ? posSizing.actualRiskPercent
+          : config.riskPerTradePercent;
+
+        const riskAmountUsd = currentEquity * (effectiveRiskPct / 100);
         const units = initialRiskPerUnit > 0 ? riskAmountUsd / initialRiskPerUnit : 0;
 
         activeTrade = {
@@ -496,6 +549,11 @@ export class HistoricalReplayEngine {
           invalidationPrice: pendingSignal.invalidationPrice ?? plan.stopLoss,
           invalidationReason: pendingSignal.invalidationReason ?? 'Structure violation / SL breach',
           funnelStage: pendingSignal.funnelStageReached ?? 'FINAL_SIGNAL',
+          trailingStrategy: dynamicPlan?.trailingStrategy,
+          trailingStepAtr: dynamicPlan?.trailingStepAtr,
+          breakevenThresholdR: dynamicPlan?.breakevenThresholdR,
+          isBreakevenTriggered: false,
+          extremePriceSinceEntry: filledPrice,
         };
 
         pendingSignal = null;
@@ -504,15 +562,25 @@ export class HistoricalReplayEngine {
 
       // 3. Attribution & Signal Evaluation on Closed Bar `t` (Available history strictly [0..t])
       const availableHistory = filteredCandles.slice(0, t + 1);
-      const evaluation = SignalDecisionEngine.evaluate(
-        availableHistory,
-        config.asset,
-        config.timeframe,
-        true,
-        true,
-        config.minRiskReward,
-        config.ablation
-      );
+      const evaluation = config.useAdaptiveEngine
+        ? AdaptiveSignalEngine.evaluate(
+            availableHistory,
+            config.asset,
+            config.timeframe,
+            true,
+            true,
+            config.minRiskReward,
+            config.ablation
+          )
+        : SignalDecisionEngine.evaluate(
+            availableHistory,
+            config.asset,
+            config.timeframe,
+            true,
+            true,
+            config.minRiskReward,
+            config.ablation
+          );
 
       // Market Regime Coverage tracking
       const currentRegime = evaluation.marketState?.regime ?? 'UNKNOWN';

@@ -5,7 +5,7 @@ import { DetailedMTFAnalysis, MultiTimeframeEngine } from './multiTimeframeEngin
 import { MarketRegimeEngine } from './regimeEngine';
 import { MarketRegimeState } from '../types';
 
-export type SetupState = 'NO_SETUP' | 'FORMING' | 'CONFIRMED' | 'ACTIVE' | 'INVALIDATED';
+export type SetupState = 'NO_SETUP' | 'FORMING' | 'WATCH' | 'CONFIRMED' | 'ACTIVE' | 'INVALIDATED';
 
 export type SignalDirection = 'LONG' | 'SHORT' | 'NEUTRAL';
 
@@ -63,6 +63,10 @@ export interface FilterAblationConfig {
   skipStructureFilter?: boolean;
   skipMomentumFilter?: boolean;
   skipResistanceFilter?: boolean;
+  useStaticWeights?: boolean;
+  useStaticMtf?: boolean;
+  useStaticSl?: boolean;
+  useStaticTp?: boolean;
 }
 
 export interface UnifiedSignalResult {
