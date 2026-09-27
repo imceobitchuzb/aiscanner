@@ -11,6 +11,7 @@ import {
   UnifiedSignalResult,
 } from './signalDecisionEngine';
 import { AdaptiveSignalEngine, AdaptiveSignalResult } from './adaptiveSignalEngine';
+import { SignalAuditTrail } from './signalAuditTrail';
 
 export interface ReplayConfig {
   asset: string;
@@ -659,6 +660,12 @@ export class HistoricalReplayEngine {
           qualityDistribution[tradeQBucket].totalR += rMultiple;
 
           trades.push(completedTrade);
+          SignalAuditTrail.attachTradeOutcome(
+            completedTrade.signalId,
+            completedTrade.outcome as 'WIN' | 'LOSS' | 'TIMEOUT',
+            completedTrade.rMultiple,
+            completedTrade.exitReason
+          );
           equityCurve.push({
             time: currentBar.time,
             equity: Math.round(currentEquity * 100) / 100,

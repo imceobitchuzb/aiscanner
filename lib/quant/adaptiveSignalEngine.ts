@@ -20,6 +20,8 @@ import {
 } from './signalDecisionEngine';
 import { ForexSessionEngine, ForexSessionState } from './forexSessionEngine';
 import { SignalAuditTrail } from './signalAuditTrail';
+import { CryptoConfirmationEngine, CryptoConfirmationResult } from './cryptoConfirmationEngine';
+import { ForexPipEngine } from './forexPipEngine';
 
 export interface AdaptiveSignalResult extends UnifiedSignalResult {
   weightProfile: WeightProfile;
@@ -30,6 +32,12 @@ export interface AdaptiveSignalResult extends UnifiedSignalResult {
   mtfConflictLevel: 'NONE' | 'LOW' | 'MEDIUM' | 'HIGH';
   forexSession?: ForexSessionState;
   forexSessionContext?: ForexSessionState;
+  cryptoConfirmation?: {
+    isApproved: boolean;
+    verdict: string;
+    isPullback: boolean;
+    isLiquiditySweepRisk: boolean;
+  };
   provenance: {
     source: string;
     timestamp: number;
@@ -163,6 +171,31 @@ export class AdaptiveSignalEngine {
     else if (features.trendSlope > 0) candidateDirection = 'LONG';
     else if (features.trendSlope < 0) candidateDirection = 'SHORT';
 
+    // 6b. Crypto 15m Higher-Timeframe Structural Confirmation & Liquidity Sweep Gating (Phase 6)
+    const cryptoValidation = CryptoConfirmationEngine.validateShortTimeframeCrypto(
+      candles,
+      candidateDirection === 'SHORT' ? 'SHORT' : 'LONG',
+      structure,
+      regime,
+      features,
+      symbol,
+      timeframe
+    );
+
+    if (!cryptoValidation.isApproved) {
+      return this.createNoSetupResult(
+        id, symbol, timeframe, timestamp,
+        cryptoValidation.reason,
+        cryptoValidation.verdict as RejectionReasonCode,
+        'STRUCTURE_PASSED',
+        candles,
+        provenance,
+        features, structure, regime, mtf,
+        undefined,
+        weightProfile
+      );
+    }
+
     // 7. Dynamic Trade Plan (calculates structural SL, TP1, TP2, TP3 & R:R)
     const tradePlan = DynamicTradePlanEngine.buildPlan(
       candidateDirection === 'SHORT' ? 'SHORT' : 'LONG',
@@ -194,8 +227,14 @@ export class AdaptiveSignalEngine {
       timeframe,
       tradePlan.riskRewardRatio,
       weightProfile,
-      conflictReport
+      conflictReport,
+      symbol
     );
+
+    if (cryptoValidation.isPullback) {
+      qualityResult.overallQuality = Math.min(100, qualityResult.overallQuality + 8);
+      qualityResult.dominantStrengths.push('VALIDATED_PULLBACK: подтверждённый откат в направлении 1h тренда.');
+    }
 
     // 9b. Forex Session Context Integration (London/NY, Opening Range)
     const isForex = symbol.includes('EUR') || symbol.includes('GBP') || symbol.includes('JPY') || (symbol.includes('USD') && !symbol.includes('USDT') && !symbol.includes('XAU'));
@@ -221,10 +260,29 @@ export class AdaptiveSignalEngine {
     }
 
     // Gate 4: Risk / Reward Filter
-    if (!ablation?.skipRiskRewardFilter && (!tradePlan.hasValidTarget || tradePlan.riskRewardRatio < minRiskRewardThreshold)) {
+    let hasAdequateRr = tradePlan.hasValidTarget && tradePlan.riskRewardRatio >= minRiskRewardThreshold;
+    if (ForexPipEngine.isForexPair(symbol)) {
+      const openHeadroom = tradePlan.stopLossDistance * 2.0;
+      const isBreaching = candidateDirection === 'LONG'
+        ? structure.lastBreakType === 'BULLISH_BOS' || features.price >= structure.keyResistance
+        : structure.lastBreakType === 'BEARISH_BOS' || features.price <= structure.keySupport;
+
+      const headroomPrice = candidateDirection === 'LONG'
+        ? (!isBreaching && structure.keyResistance > features.price ? structure.keyResistance - features.price : openHeadroom)
+        : (!isBreaching && features.price > structure.keySupport ? features.price - structure.keySupport : openHeadroom);
+
+      const fxAssessment = ForexPipEngine.evaluateForexHeadroom(symbol, headroomPrice, tradePlan.stopLossDistance, minRiskRewardThreshold);
+      hasAdequateRr = fxAssessment.hasValidRr;
+    }
+
+    if (!ablation?.skipRiskRewardFilter && !hasAdequateRr) {
+      const rejectionReason = !tradePlan.hasValidTarget
+        ? `Ближайший уровень сопротивления/поддержки расположен слишком близко к точке входа для достижения ${minRiskRewardThreshold.toFixed(1)}R.`
+        : `Неприемлемый коэффициент риск/прибыль (R:R ${tradePlan.riskRewardRatio.toFixed(2)} < ${minRiskRewardThreshold.toFixed(1)}). Ближайшая преграда расположена слишком близко.`;
+
       return this.createNoSetupResult(
         id, symbol, timeframe, timestamp,
-        `Неприемлемый коэффициент риск/прибыль (R:R ${tradePlan.riskRewardRatio.toFixed(2)} < ${minRiskRewardThreshold.toFixed(1)}). Ближайшая преграда расположена слишком близко.`,
+        rejectionReason,
         'BAD_RR',
         'MTF_PASSED',
         candles,
@@ -391,6 +449,12 @@ export class AdaptiveSignalEngine {
       mtfConflictLevel: conflictReport.conflicts.find((c) => c.category === 'MTF')?.severity || 'NONE',
       forexSession,
       forexSessionContext: forexSession,
+      cryptoConfirmation: {
+        isApproved: cryptoValidation.isApproved,
+        verdict: cryptoValidation.verdict,
+        isPullback: cryptoValidation.isPullback,
+        isLiquiditySweepRisk: cryptoValidation.isLiquiditySweepRisk,
+      },
       provenance,
     };
 
@@ -398,16 +462,22 @@ export class AdaptiveSignalEngine {
       id,
       timestamp,
       symbol,
+      asset: symbol,
       timeframe,
       regime: regime.regime,
+      htfStructure: `${cryptoValidation.structure1h.state} / ${cryptoValidation.structure4h.state}`,
+      session: forexSession?.activeSession,
       setupState,
       direction: candidateDirection,
+      directionalBias: candidateDirection,
       setupQuality: qualityResult.overallQuality,
       rankScore: Math.round(qualityResult.overallQuality * 0.5 + Math.min(100, tradePlan.riskRewardRatio * 25) * 0.25 + mtf.alignmentScore * 0.25 - conflictReport.totalQualityPenalty),
       mtfAlignment: mtf.alignmentScore,
       conflictLevel: conflictReport.overallLevel,
       conflictPenalty: conflictReport.totalQualityPenalty,
       volatilityState: (features?.atrPercent ?? 0) > 3.0 ? 'HIGH' : (features?.atrPercent ?? 0) < 0.8 ? 'LOW' : 'NORMAL',
+      volatility: (features?.atrPercent ?? 0) > 3.0 ? 'HIGH' : (features?.atrPercent ?? 0) < 0.8 ? 'LOW' : 'NORMAL',
+      liquiditySweepRisk: cryptoValidation.isLiquiditySweepRisk,
       factorScores: {
         trend: qualityResult.factorScores.trend.rawScore,
         structure: qualityResult.factorScores.structure.rawScore,
@@ -418,10 +488,16 @@ export class AdaptiveSignalEngine {
         riskReward: qualityResult.factorScores.riskReward.rawScore,
       },
       entryPrice: tradePlan.entryPrice,
+      entry: tradePlan.entryPrice,
       stopLoss: tradePlan.stopLoss,
+      sl: tradePlan.stopLoss,
       takeProfit1: tradePlan.takeProfit1,
+      tp1: tradePlan.takeProfit1,
       takeProfit2: tradePlan.takeProfit2,
+      tp2: tradePlan.takeProfit2,
       takeProfit3: tradePlan.takeProfit3 || 0,
+      tp3: tradePlan.takeProfit3 || 0,
+      riskRewardRatio: tradePlan.riskRewardRatio,
       riskMultiplier: positionSizing.actualRiskPercent,
       finalDecision: setupState === 'CONFIRMED' || setupState === 'ACTIVE' ? 'EXECUTE' : setupState === 'WATCH' ? 'WATCH' : 'REJECT',
       provenance: {

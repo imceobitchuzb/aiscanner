@@ -4,6 +4,7 @@ import { DetailedMTFAnalysis } from './multiTimeframeEngine';
 import { MarketRegimeState, Timeframe } from '../types';
 import { FactorWeights, WeightProfile } from './weightProfiles';
 import { ConflictReport } from './signalConflictEngine';
+import { ForexPipEngine } from './forexPipEngine';
 
 export interface FactorScoreItem {
   name: string;
@@ -38,7 +39,8 @@ export class ContextAwareQualityEngine {
     timeframe: Timeframe,
     riskRewardRatio: number,
     weightProfile: WeightProfile,
-    conflictReport: ConflictReport
+    conflictReport: ConflictReport,
+    symbol = 'BTCUSDT'
   ): ContextAwareQualityResult {
     const isLong = direction === 'LONG';
     const weights = weightProfile.weights;
@@ -153,15 +155,21 @@ export class ContextAwareQualityEngine {
     // 5. Volatility Score (0-100)
     let volatilityScore = 60;
     let volatilityReason = 'Волатильность в нормальном рабочем диапазоне.';
-    if (features.atrPercent >= 0.8 && features.atrPercent <= 3.2) {
-      volatilityScore = 85;
-      volatilityReason = `Оптимальная волатильность (ATR ${features.atrPercent.toFixed(2)}%): баланс потенциала хода и контролируемого риска.`;
-    } else if (features.atrPercent > 4.5) {
-      volatilityScore = 35;
-      volatilityReason = `Экстремальный размах колебаний (ATR ${features.atrPercent.toFixed(2)}%): высокий риск резкого проскальзывания.`;
-    } else if (features.atrPercent < 0.4) {
-      volatilityScore = 45;
-      volatilityReason = `Низкая волатильность (ATR ${features.atrPercent.toFixed(2)}%): возможен долгий дрейф без реализации движения.`;
+    if (ForexPipEngine.isForexPair(symbol)) {
+      const fxVol = ForexPipEngine.evaluateForexVolatility(symbol, features.atr14, timeframe);
+      volatilityScore = fxVol.score;
+      volatilityReason = fxVol.reason;
+    } else {
+      if (features.atrPercent >= 0.8 && features.atrPercent <= 3.2) {
+        volatilityScore = 85;
+        volatilityReason = `Оптимальная волатильность (ATR ${features.atrPercent.toFixed(2)}%): баланс потенциала хода и контролируемого риска.`;
+      } else if (features.atrPercent > 4.5) {
+        volatilityScore = 35;
+        volatilityReason = `Экстремальный размах колебаний (ATR ${features.atrPercent.toFixed(2)}%): высокий риск резкого проскальзывания.`;
+      } else if (features.atrPercent < 0.4) {
+        volatilityScore = 45;
+        volatilityReason = `Низкая волатильность (ATR ${features.atrPercent.toFixed(2)}%): возможен долгий дрейф без реализации движения.`;
+      }
     }
 
     // 6. MTF Score (0-100) — Hierarchical Alignment
@@ -194,7 +202,14 @@ export class ContextAwareQualityEngine {
     // 7. Support / Resistance Score (0-100)
     let srScore = 60;
     let srReason = 'Достаточный запас хода до ключевых ценовых преград.';
-    if (isLong) {
+    if (ForexPipEngine.isForexPair(symbol)) {
+      const headroomPrice = isLong
+        ? (structure.keyResistance > features.price ? structure.keyResistance - features.price : features.atr14 * 2)
+        : (features.price > structure.keySupport ? features.price - structure.keySupport : features.atr14 * 2);
+      const fxHeadroom = ForexPipEngine.evaluateForexHeadroom(symbol, headroomPrice, features.atr14 * 1.5, 1.5);
+      srScore = fxHeadroom.score;
+      srReason = fxHeadroom.reason;
+    } else if (isLong) {
       if (structure.distanceToResistancePct >= 2.0) {
         srScore = 90;
         srReason = `Широкий коридор хода: до ближайшего сопротивления ${structure.distanceToResistancePct.toFixed(2)}%.`;

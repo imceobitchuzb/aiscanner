@@ -171,7 +171,10 @@ export class DynamicTradePlanEngine {
         takeProfit2 = entryPrice + minTp2Distance;
         takeProfit3 = entryPrice + stopLossDistance * 3.0;
         if (structure.keyResistance > entryPrice && structure.keyResistance - entryPrice < minTp1Distance) {
-          hasValidTarget = false; // Resistance is too close for adequate R:R
+          // If structure indicates a fresh breakout or strong trend continuation, target projects beyond breached swing
+          if (regime.regime !== 'BREAKOUT' && structure.lastBreakType !== 'BULLISH_BOS') {
+            hasValidTarget = false; // Resistance is too close for adequate R:R in normal ranging conditions
+          }
         }
       }
     } else {
@@ -187,7 +190,9 @@ export class DynamicTradePlanEngine {
         takeProfit2 = entryPrice - minTp2Distance;
         takeProfit3 = entryPrice - stopLossDistance * 3.0;
         if (structure.keySupport > 0 && entryPrice - structure.keySupport < minTp1Distance) {
-          hasValidTarget = false;
+          if (regime.regime !== 'BREAKOUT' && structure.lastBreakType !== 'BEARISH_BOS') {
+            hasValidTarget = false;
+          }
         }
       }
     }

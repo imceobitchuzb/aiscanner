@@ -1,6 +1,20 @@
 import { Candle, Timeframe } from '../types';
 import { HistoricalReplayEngine, ReplayConfig, ReplaySummary } from './historicalReplayEngine';
 
+export interface WindowMetrics {
+  trades: number;
+  winRate: number;
+  expectancyR: number;
+  profitFactor: number;
+  maxDrawdownPercent: number;
+  netPnlUsd: number;
+  averageR: number;
+  medianR: number;
+  exposurePercent: number;
+  rejectionRatePercent: number;
+  isStatisticallyReliable: boolean;
+}
+
 export interface WalkForwardWindow {
   windowIndex: number;
   trainRange: { start: number; end: number; candles: number };
@@ -9,6 +23,8 @@ export interface WalkForwardWindow {
   inSample: ReplaySummary;
   validation: ReplaySummary;
   outOfSample: ReplaySummary; // Strictly Unseen Test
+  inSampleMetrics: WindowMetrics;
+  outOfSampleMetrics: WindowMetrics;
   walkForwardEfficiency: number; // Out-of-Sample Profit Factor / In-Sample Profit Factor
 }
 
@@ -21,15 +37,31 @@ export interface WalkForwardAnalysisResult {
     winRate: number;
     profitFactor: number;
     expectancyR: number;
+    maxDrawdownPercent: number;
+    netPnlUsd: number;
+    averageR: number;
+    medianR: number;
+    exposurePercent: number;
+    rejectionRatePercent: number;
+    isStatisticallyReliable: boolean;
   };
   aggregateOutOfSample: {
     totalTrades: number;
     winRate: number;
     profitFactor: number;
     expectancyR: number;
+    maxDrawdownPercent: number;
+    netPnlUsd: number;
+    averageR: number;
+    medianR: number;
+    exposurePercent: number;
+    rejectionRatePercent: number;
+    isStatisticallyReliable: boolean;
   };
   meanWFE: number; // Walk Forward Efficiency
   robustnessGrade: 'ROBUST' | 'MODERATE' | 'OVERFITTED' | 'INSUFFICIENT_DATA';
+  isStatisticallyReliable: boolean;
+  statisticalVerdict: 'PROVEN_EDGE' | 'TENTATIVE_EDGE' | 'OVERFITTED' | 'INSUFFICIENT_SAMPLE_SIZE';
   verdict: string;
 }
 
@@ -47,6 +79,7 @@ export interface WalkForwardReport {
     netPnlUsd: number;
     averageR: number;
     medianR: number;
+    exposurePercent: number;
     rejectionRatePercent: number;
     isStatisticallyReliable: boolean;
   };
@@ -59,6 +92,7 @@ export interface WalkForwardReport {
     netPnlUsd: number;
     averageR: number;
     medianR: number;
+    exposurePercent: number;
     rejectionRatePercent: number;
     isStatisticallyReliable: boolean;
   };
@@ -68,9 +102,32 @@ export interface WalkForwardReport {
 }
 
 export class WalkForwardEngine {
+  private static extractMetrics(replay: ReplaySummary): WindowMetrics {
+    const pot = replay.rejectionFunnel?.potentialBars || replay.totalCandles || 1;
+    const sigs = replay.totalSignalsGenerated;
+    const rejRate = Math.round(((pot - sigs) / pot) * 10000) / 100;
+    const totalDurationBars = replay.trades.reduce((s, t) => s + t.durationBars, 0);
+    const exposure = replay.totalCandles > 0 ? Math.round((totalDurationBars / replay.totalCandles) * 10000) / 100 : 0;
+
+    return {
+      trades: replay.totalTradesExecuted,
+      winRate: replay.winRate,
+      expectancyR: replay.expectancyR,
+      profitFactor: replay.profitFactor,
+      maxDrawdownPercent: replay.maxDrawdownPercent,
+      netPnlUsd: replay.netPnlUsd,
+      averageR: replay.averageR,
+      medianR: replay.medianR,
+      exposurePercent: exposure,
+      rejectionRatePercent: rejRate,
+      isStatisticallyReliable: replay.totalTradesExecuted >= 30,
+    };
+  }
+
   /**
-   * Phase 3 Compatible: Performs an honest Walk-Forward analysis with rolling train/val/test splits.
+   * Phase 3 & 6: Performs an honest Multi-Window Walk-Forward analysis with rolling train/val/test splits.
    * Crucially: Test data is completely unseen during training/parameter selection.
+   * Strictly flags < 30 trades as INSUFFICIENT_SAMPLE_SIZE.
    */
   public static runWalkForward(
     candles: Candle[],
@@ -83,10 +140,20 @@ export class WalkForwardEngine {
         status: 'INSUFFICIENT_DATA',
         totalWindows: 0,
         windows: [],
-        aggregateInSample: { totalTrades: 0, winRate: 0, profitFactor: 0, expectancyR: 0 },
-        aggregateOutOfSample: { totalTrades: 0, winRate: 0, profitFactor: 0, expectancyR: 0 },
+        aggregateInSample: {
+          totalTrades: 0, winRate: 0, profitFactor: 0, expectancyR: 0,
+          maxDrawdownPercent: 0, netPnlUsd: 0, averageR: 0, medianR: 0,
+          exposurePercent: 0, rejectionRatePercent: 0, isStatisticallyReliable: false,
+        },
+        aggregateOutOfSample: {
+          totalTrades: 0, winRate: 0, profitFactor: 0, expectancyR: 0,
+          maxDrawdownPercent: 0, netPnlUsd: 0, averageR: 0, medianR: 0,
+          exposurePercent: 0, rejectionRatePercent: 0, isStatisticallyReliable: false,
+        },
         meanWFE: 0,
         robustnessGrade: 'INSUFFICIENT_DATA',
+        isStatisticallyReliable: false,
+        statisticalVerdict: 'INSUFFICIENT_SAMPLE_SIZE',
         verdict: 'Недостаточно исторических свечей для скользящей валидации (требуется >= 50 свечей).',
       };
     }
@@ -143,6 +210,8 @@ export class WalkForwardEngine {
         inSample,
         validation,
         outOfSample,
+        inSampleMetrics: this.extractMetrics(inSample),
+        outOfSampleMetrics: this.extractMetrics(outOfSample),
         walkForwardEfficiency: wfe,
       });
     }
@@ -152,10 +221,20 @@ export class WalkForwardEngine {
         status: 'INSUFFICIENT_DATA',
         totalWindows: 0,
         windows: [],
-        aggregateInSample: { totalTrades: 0, winRate: 0, profitFactor: 0, expectancyR: 0 },
-        aggregateOutOfSample: { totalTrades: 0, winRate: 0, profitFactor: 0, expectancyR: 0 },
+        aggregateInSample: {
+          totalTrades: 0, winRate: 0, profitFactor: 0, expectancyR: 0,
+          maxDrawdownPercent: 0, netPnlUsd: 0, averageR: 0, medianR: 0,
+          exposurePercent: 0, rejectionRatePercent: 0, isStatisticallyReliable: false,
+        },
+        aggregateOutOfSample: {
+          totalTrades: 0, winRate: 0, profitFactor: 0, expectancyR: 0,
+          maxDrawdownPercent: 0, netPnlUsd: 0, averageR: 0, medianR: 0,
+          exposurePercent: 0, rejectionRatePercent: 0, isStatisticallyReliable: false,
+        },
         meanWFE: 0,
         robustnessGrade: 'INSUFFICIENT_DATA',
+        isStatisticallyReliable: false,
+        statisticalVerdict: 'INSUFFICIENT_SAMPLE_SIZE',
         verdict: 'Окна скользящей валидации не содержат достаточного количества данных.',
       };
     }
@@ -166,14 +245,20 @@ export class WalkForwardEngine {
     const inWinRate = inTrades > 0 ? Math.round((inWins / inTrades) * 10000) / 100 : 0;
     const inPF = windows.reduce((s, w) => s + w.inSample.profitFactor, 0) / windows.length;
     const inExp = windows.reduce((s, w) => s + w.inSample.expectancyR, 0) / windows.length;
+    const inNetPnl = windows.reduce((s, w) => s + w.inSample.netPnlUsd, 0);
+    const inMaxDd = Math.max(...windows.map((w) => w.inSample.maxDrawdownPercent));
 
     const outTrades = windows.reduce((s, w) => s + w.outOfSample.totalTradesExecuted, 0);
     const outWins = windows.reduce((s, w) => s + w.outOfSample.wins, 0);
     const outWinRate = outTrades > 0 ? Math.round((outWins / outTrades) * 10000) / 100 : 0;
     const outPF = windows.reduce((s, w) => s + w.outOfSample.profitFactor, 0) / windows.length;
     const outExp = windows.reduce((s, w) => s + w.outOfSample.expectancyR, 0) / windows.length;
+    const outNetPnl = windows.reduce((s, w) => s + w.outOfSample.netPnlUsd, 0);
+    const outMaxDd = Math.max(...windows.map((w) => w.outOfSample.maxDrawdownPercent));
 
     const meanWFE = Math.round((windows.reduce((s, w) => s + w.walkForwardEfficiency, 0) / windows.length) * 100) / 100;
+
+    const isReliable = outTrades >= 30;
 
     let robustnessGrade: WalkForwardAnalysisResult['robustnessGrade'] = 'OVERFITTED';
     let verdict = 'Значительная деградация на неизвестных данных (WFE < 0.5). Признак переобучения.';
@@ -186,6 +271,17 @@ export class WalkForwardEngine {
       verdict = 'Умеренная устойчивость на OOS (WFE 0.5-0.75). Результаты стабильны, но требуют контроля просадки.';
     }
 
+    let statisticalVerdict: WalkForwardAnalysisResult['statisticalVerdict'] = 'INSUFFICIENT_SAMPLE_SIZE';
+    if (!isReliable) {
+      statisticalVerdict = 'INSUFFICIENT_SAMPLE_SIZE';
+    } else if (robustnessGrade === 'ROBUST' && outExp > 0) {
+      statisticalVerdict = 'PROVEN_EDGE';
+    } else if (robustnessGrade === 'MODERATE' && outExp > 0) {
+      statisticalVerdict = 'TENTATIVE_EDGE';
+    } else {
+      statisticalVerdict = 'OVERFITTED';
+    }
+
     return {
       status: 'SUCCESS',
       totalWindows: windows.length,
@@ -195,21 +291,37 @@ export class WalkForwardEngine {
         winRate: inWinRate,
         profitFactor: Math.round(inPF * 100) / 100,
         expectancyR: Math.round(inExp * 100) / 100,
+        maxDrawdownPercent: inMaxDd,
+        netPnlUsd: inNetPnl,
+        averageR: Math.round(inExp * 100) / 100,
+        medianR: Math.round(inExp * 100) / 100,
+        exposurePercent: Math.round((windows.reduce((s, w) => s + w.inSampleMetrics.exposurePercent, 0) / windows.length) * 100) / 100,
+        rejectionRatePercent: Math.round((windows.reduce((s, w) => s + w.inSampleMetrics.rejectionRatePercent, 0) / windows.length) * 100) / 100,
+        isStatisticallyReliable: inTrades >= 30,
       },
       aggregateOutOfSample: {
         totalTrades: outTrades,
         winRate: outWinRate,
         profitFactor: Math.round(outPF * 100) / 100,
         expectancyR: Math.round(outExp * 100) / 100,
+        maxDrawdownPercent: outMaxDd,
+        netPnlUsd: outNetPnl,
+        averageR: Math.round(outExp * 100) / 100,
+        medianR: Math.round(outExp * 100) / 100,
+        exposurePercent: Math.round((windows.reduce((s, w) => s + w.outOfSampleMetrics.exposurePercent, 0) / windows.length) * 100) / 100,
+        rejectionRatePercent: Math.round((windows.reduce((s, w) => s + w.outOfSampleMetrics.rejectionRatePercent, 0) / windows.length) * 100) / 100,
+        isStatisticallyReliable: isReliable,
       },
       meanWFE,
       robustnessGrade,
+      isStatisticallyReliable: isReliable,
+      statisticalVerdict,
       verdict,
     };
   }
 
   /**
-   * Phase 5B: Strict temporal chronological split (e.g. 70% In-Sample, 30% Out-of-Sample).
+   * Phase 5B & 6: Strict temporal chronological split (e.g. 70% In-Sample, 30% Out-of-Sample).
    * Zero lookahead, zero data shuffling.
    * Explicitly evaluates statistical validity (< 30 trades => INSUFFICIENT_SAMPLE_SIZE).
    */
@@ -233,6 +345,7 @@ export class WalkForwardEngine {
           netPnlUsd: 0,
           averageR: 0,
           medianR: 0,
+          exposurePercent: 0,
           rejectionRatePercent: 0,
           isStatisticallyReliable: false,
         },
@@ -245,6 +358,7 @@ export class WalkForwardEngine {
           netPnlUsd: 0,
           averageR: 0,
           medianR: 0,
+          exposurePercent: 0,
           rejectionRatePercent: 0,
           isStatisticallyReliable: false,
         },
@@ -310,6 +424,11 @@ export class WalkForwardEngine {
       return pot > 0 ? Math.round(((pot - sigs) / pot) * 10000) / 100 : 0;
     };
 
+    const calcExposure = (replay: ReplaySummary) => {
+      const dur = replay.trades.reduce((s, t) => s + t.durationBars, 0);
+      return replay.totalCandles > 0 ? Math.round((dur / replay.totalCandles) * 10000) / 100 : 0;
+    };
+
     return {
       asset: userConfig.asset,
       timeframe: userConfig.timeframe,
@@ -324,6 +443,7 @@ export class WalkForwardEngine {
         netPnlUsd: isReplay.netPnlUsd,
         averageR: isReplay.averageR,
         medianR: isReplay.medianR,
+        exposurePercent: calcExposure(isReplay),
         rejectionRatePercent: calcRejectionRate(isReplay),
         isStatisticallyReliable: isReliableIS,
       },
@@ -336,6 +456,7 @@ export class WalkForwardEngine {
         netPnlUsd: oosReplay.netPnlUsd,
         averageR: oosReplay.averageR,
         medianR: oosReplay.medianR,
+        exposurePercent: calcExposure(oosReplay),
         rejectionRatePercent: calcRejectionRate(oosReplay),
         isStatisticallyReliable: isReliableOOS,
       },
