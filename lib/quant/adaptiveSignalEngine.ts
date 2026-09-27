@@ -18,6 +18,8 @@ import {
   SignalDirection,
   UnifiedSignalResult,
 } from './signalDecisionEngine';
+import { ForexSessionEngine, ForexSessionState } from './forexSessionEngine';
+import { SignalAuditTrail } from './signalAuditTrail';
 
 export interface AdaptiveSignalResult extends UnifiedSignalResult {
   weightProfile: WeightProfile;
@@ -26,6 +28,8 @@ export interface AdaptiveSignalResult extends UnifiedSignalResult {
   positionSizing: PositionSizeResult;
   dynamicPlan: DynamicTradePlan;
   mtfConflictLevel: 'NONE' | 'LOW' | 'MEDIUM' | 'HIGH';
+  forexSession?: ForexSessionState;
+  forexSessionContext?: ForexSessionState;
   provenance: {
     source: string;
     timestamp: number;
@@ -193,6 +197,29 @@ export class AdaptiveSignalEngine {
       conflictReport
     );
 
+    // 9b. Forex Session Context Integration (London/NY, Opening Range)
+    const isForex = symbol.includes('EUR') || symbol.includes('GBP') || symbol.includes('JPY') || (symbol.includes('USD') && !symbol.includes('USDT') && !symbol.includes('XAU'));
+    const forexSession = isForex ? ForexSessionEngine.analyzeSession(candles, symbol, timeframe) : undefined;
+
+    if (forexSession) {
+      if (forexSession.openingRangeBreakout === 'BULLISH' && candidateDirection === 'LONG') {
+        qualityResult.overallQuality = Math.min(100, qualityResult.overallQuality + 5);
+      } else if (forexSession.openingRangeBreakout === 'BEARISH' && candidateDirection === 'SHORT') {
+        qualityResult.overallQuality = Math.min(100, qualityResult.overallQuality + 5);
+      } else if (forexSession.activeSessions.includes('OFF_HOURS')) {
+        conflictReport.conflicts.push({
+          category: 'LIQUIDITY',
+          severity: 'LOW',
+          title: 'Внебиржевые часы Forex (Off-Hours)',
+          description: 'Сессия после закрытия Нью-Йорка: пониженная межбанковская ликвидность.',
+          mitigation: 'Снизить размер лота и избегать рыночных ордеров.',
+          qualityPenalty: 5,
+        });
+        conflictReport.totalQualityPenalty += 5;
+        qualityResult.overallQuality = Math.max(0, qualityResult.overallQuality - 5);
+      }
+    }
+
     // Gate 4: Risk / Reward Filter
     if (!ablation?.skipRiskRewardFilter && (!tradePlan.hasValidTarget || tradePlan.riskRewardRatio < minRiskRewardThreshold)) {
       return this.createNoSetupResult(
@@ -323,7 +350,7 @@ export class AdaptiveSignalEngine {
       hasValidTarget: tradePlan.hasValidTarget,
     };
 
-    return {
+    const result: AdaptiveSignalResult = {
       id,
       symbol,
       timeframe,
@@ -362,8 +389,48 @@ export class AdaptiveSignalEngine {
       positionSizing,
       dynamicPlan: tradePlan,
       mtfConflictLevel: conflictReport.conflicts.find((c) => c.category === 'MTF')?.severity || 'NONE',
+      forexSession,
+      forexSessionContext: forexSession,
       provenance,
     };
+
+    SignalAuditTrail.logDecision({
+      id,
+      timestamp,
+      symbol,
+      timeframe,
+      regime: regime.regime,
+      setupState,
+      direction: candidateDirection,
+      setupQuality: qualityResult.overallQuality,
+      rankScore: Math.round(qualityResult.overallQuality * 0.5 + Math.min(100, tradePlan.riskRewardRatio * 25) * 0.25 + mtf.alignmentScore * 0.25 - conflictReport.totalQualityPenalty),
+      mtfAlignment: mtf.alignmentScore,
+      conflictLevel: conflictReport.overallLevel,
+      conflictPenalty: conflictReport.totalQualityPenalty,
+      volatilityState: (features?.atrPercent ?? 0) > 3.0 ? 'HIGH' : (features?.atrPercent ?? 0) < 0.8 ? 'LOW' : 'NORMAL',
+      factorScores: {
+        trend: qualityResult.factorScores.trend.rawScore,
+        structure: qualityResult.factorScores.structure.rawScore,
+        momentum: qualityResult.factorScores.momentum.rawScore,
+        volume: qualityResult.factorScores.volume.rawScore,
+        volatility: qualityResult.factorScores.volatility.rawScore,
+        mtf: qualityResult.factorScores.mtf.rawScore,
+        riskReward: qualityResult.factorScores.riskReward.rawScore,
+      },
+      entryPrice: tradePlan.entryPrice,
+      stopLoss: tradePlan.stopLoss,
+      takeProfit1: tradePlan.takeProfit1,
+      takeProfit2: tradePlan.takeProfit2,
+      takeProfit3: tradePlan.takeProfit3 || 0,
+      riskMultiplier: positionSizing.actualRiskPercent,
+      finalDecision: setupState === 'CONFIRMED' || setupState === 'ACTIVE' ? 'EXECUTE' : setupState === 'WATCH' ? 'WATCH' : 'REJECT',
+      provenance: {
+        source: provenance.source,
+        freshness: provenance.freshness,
+      },
+    });
+
+    return result;
   }
 
   private static createNoSetupResult(
@@ -455,7 +522,10 @@ export class AdaptiveSignalEngine {
       explanation: 'Сетап отсутствует, позиция не открывается.',
     };
 
-    return {
+    const isForex = symbol.includes('EUR') || symbol.includes('GBP') || symbol.includes('USD') || symbol.includes('JPY');
+    const forexSession = isForex ? ForexSessionEngine.analyzeSession(candles || [], symbol, timeframe) : undefined;
+
+    const noSetupResult: AdaptiveSignalResult = {
       id,
       symbol,
       timeframe,
@@ -495,7 +565,41 @@ export class AdaptiveSignalEngine {
       positionSizing: emptySizing,
       dynamicPlan: emptyTradePlan,
       mtfConflictLevel: 'NONE',
+      forexSession,
+      forexSessionContext: forexSession,
       provenance: defaultProvenance,
     };
+
+    SignalAuditTrail.logDecision({
+      id,
+      timestamp,
+      symbol,
+      timeframe,
+      regime: regime?.regime || 'UNCERTAIN',
+      setupState: 'NO_SETUP',
+      direction: 'NEUTRAL',
+      setupQuality: 0,
+      rankScore: 0,
+      mtfAlignment: mtf?.alignmentScore || 0,
+      conflictLevel: defaultConflicts.overallLevel,
+      conflictPenalty: defaultConflicts.totalQualityPenalty,
+      volatilityState: (features?.atrPercent ?? 0) > 3.0 ? 'HIGH' : 'NORMAL',
+      factorScores: {},
+      entryPrice: p,
+      stopLoss: emptyTradePlan.stopLoss,
+      takeProfit1: emptyTradePlan.takeProfit1,
+      takeProfit2: emptyTradePlan.takeProfit2,
+      takeProfit3: emptyTradePlan.takeProfit3 || emptyTradePlan.takeProfit2 * 1.02,
+      riskMultiplier: 0,
+      finalDecision: 'REJECT',
+      rejectionReason,
+      rejectionCode,
+      provenance: {
+        source: defaultProvenance.source,
+        freshness: defaultProvenance.freshness,
+      },
+    });
+
+    return noSetupResult;
   }
 }

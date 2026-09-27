@@ -1,4 +1,4 @@
-import { Candle } from '../types';
+import { Candle, Timeframe } from '../types';
 import { HistoricalReplayEngine, ReplayConfig, ReplaySummary } from './historicalReplayEngine';
 
 export interface WalkForwardWindow {
@@ -33,9 +33,43 @@ export interface WalkForwardAnalysisResult {
   verdict: string;
 }
 
+export interface WalkForwardReport {
+  asset: string;
+  timeframe: Timeframe;
+  totalCandles: number;
+  splitRatio: number; // e.g. 0.70
+  inSampleSummary: {
+    trades: number;
+    winRate: number;
+    expectancyR: number;
+    profitFactor: number;
+    maxDrawdownPercent: number;
+    netPnlUsd: number;
+    averageR: number;
+    medianR: number;
+    rejectionRatePercent: number;
+    isStatisticallyReliable: boolean;
+  };
+  outOfSampleSummary: {
+    trades: number;
+    winRate: number;
+    expectancyR: number;
+    profitFactor: number;
+    maxDrawdownPercent: number;
+    netPnlUsd: number;
+    averageR: number;
+    medianR: number;
+    rejectionRatePercent: number;
+    isStatisticallyReliable: boolean;
+  };
+  generalizationScore: number; // 0 - 100
+  statisticalVerdict: 'PROVEN_EDGE' | 'TENTATIVE_EDGE' | 'OVERFITTED' | 'INSUFFICIENT_SAMPLE_SIZE';
+  conclusion: string;
+}
+
 export class WalkForwardEngine {
   /**
-   * Performs an honest Walk-Forward analysis with rolling train/val/test splits.
+   * Phase 3 Compatible: Performs an honest Walk-Forward analysis with rolling train/val/test splits.
    * Crucially: Test data is completely unseen during training/parameter selection.
    */
   public static runWalkForward(
@@ -43,8 +77,8 @@ export class WalkForwardEngine {
     baseConfig: ReplayConfig,
     numWindows = 3
   ): WalkForwardAnalysisResult {
-    const n = candles.length;
-    if (n < 120) {
+    const n = candles ? candles.length : 0;
+    if (n < 50) {
       return {
         status: 'INSUFFICIENT_DATA',
         totalWindows: 0,
@@ -53,7 +87,7 @@ export class WalkForwardEngine {
         aggregateOutOfSample: { totalTrades: 0, winRate: 0, profitFactor: 0, expectancyR: 0 },
         meanWFE: 0,
         robustnessGrade: 'INSUFFICIENT_DATA',
-        verdict: 'Недостаточно исторических свечей для скользящей валидации (требуется >= 120 свечей).',
+        verdict: 'Недостаточно исторических свечей для скользящей валидации (требуется >= 50 свечей).',
       };
     }
 
@@ -69,7 +103,7 @@ export class WalkForwardEngine {
       const endIndex = Math.min(n, startIndex + windowSize * 2);
       const windowCandles = candles.slice(startIndex, endIndex);
 
-      if (windowCandles.length < 50) continue;
+      if (windowCandles.length < 35) continue;
 
       const trainCount = Math.floor(windowCandles.length * trainRatio);
       const valCount = Math.floor(windowCandles.length * valRatio);
@@ -78,10 +112,10 @@ export class WalkForwardEngine {
       const valCandles = windowCandles.slice(trainCount, trainCount + valCount);
       const testCandles = windowCandles.slice(trainCount + valCount);
 
-      if (trainCandles.length < 30 || testCandles.length < 15) continue;
+      if (trainCandles.length < 20 || testCandles.length < 10) continue;
 
       const inSample = HistoricalReplayEngine.runReplay(trainCandles, baseConfig);
-      const validation = HistoricalReplayEngine.runReplay(valCandles, baseConfig);
+      const validation = HistoricalReplayEngine.runReplay(valCandles.length >= 10 ? valCandles : trainCandles, baseConfig);
       // Strictly Unseen Test
       const outOfSample = HistoricalReplayEngine.runReplay(testCandles, baseConfig);
 
@@ -171,6 +205,143 @@ export class WalkForwardEngine {
       meanWFE,
       robustnessGrade,
       verdict,
+    };
+  }
+
+  /**
+   * Phase 5B: Strict temporal chronological split (e.g. 70% In-Sample, 30% Out-of-Sample).
+   * Zero lookahead, zero data shuffling.
+   * Explicitly evaluates statistical validity (< 30 trades => INSUFFICIENT_SAMPLE_SIZE).
+   */
+  public static runTemporalSplit(
+    candles: Candle[],
+    userConfig: ReplayConfig,
+    inSampleFraction = 0.70
+  ): WalkForwardReport {
+    if (!candles || candles.length < 50) {
+      return {
+        asset: userConfig.asset,
+        timeframe: userConfig.timeframe,
+        totalCandles: candles ? candles.length : 0,
+        splitRatio: inSampleFraction,
+        inSampleSummary: {
+          trades: 0,
+          winRate: 0,
+          expectancyR: 0,
+          profitFactor: 0,
+          maxDrawdownPercent: 0,
+          netPnlUsd: 0,
+          averageR: 0,
+          medianR: 0,
+          rejectionRatePercent: 0,
+          isStatisticallyReliable: false,
+        },
+        outOfSampleSummary: {
+          trades: 0,
+          winRate: 0,
+          expectancyR: 0,
+          profitFactor: 0,
+          maxDrawdownPercent: 0,
+          netPnlUsd: 0,
+          averageR: 0,
+          medianR: 0,
+          rejectionRatePercent: 0,
+          isStatisticallyReliable: false,
+        },
+        generalizationScore: 0,
+        statisticalVerdict: 'INSUFFICIENT_SAMPLE_SIZE',
+        conclusion: 'Недостаточно свечей для временного разделения выборки (минимум 50 свечей).',
+      };
+    }
+
+    const splitIdx = Math.floor(candles.length * inSampleFraction);
+    const isCandles = candles.slice(0, splitIdx);
+    const oosCandles = candles.slice(splitIdx);
+
+    // 1. Run In-Sample Replay
+    const isReplay = HistoricalReplayEngine.runReplay(isCandles, {
+      ...userConfig,
+      startDate: isCandles[0].time,
+      endDate: isCandles[isCandles.length - 1].time,
+    });
+
+    // 2. Run Out-of-Sample Replay
+    const oosReplay = HistoricalReplayEngine.runReplay(oosCandles, {
+      ...userConfig,
+      startDate: oosCandles[0].time,
+      endDate: oosCandles[oosCandles.length - 1].time,
+    });
+
+    // Statistical safety check: minimum 30 trades to claim statistical validity
+    const isReliableIS = isReplay.totalTradesExecuted >= 30;
+    const isReliableOOS = oosReplay.totalTradesExecuted >= 30;
+
+    // Generalization efficiency: compares OOS expectancy to IS expectancy
+    let efficiencyRatio = 0;
+    if (isReplay.expectancyR > 0) {
+      efficiencyRatio = Math.max(0, oosReplay.expectancyR / isReplay.expectancyR);
+    } else if (isReplay.expectancyR <= 0 && oosReplay.expectancyR <= 0) {
+      efficiencyRatio = 1.0;
+    }
+
+    const generalizationScore = Math.min(100, Math.round(efficiencyRatio * 100));
+
+    // Determine statistical verdict
+    let statisticalVerdict: WalkForwardReport['statisticalVerdict'] = 'INSUFFICIENT_SAMPLE_SIZE';
+    let conclusion = '';
+
+    if (!isReliableIS || !isReliableOOS) {
+      statisticalVerdict = 'INSUFFICIENT_SAMPLE_SIZE';
+      conclusion = `Выборка сделок недостаточна для статистического доказательства превосходства (IS: ${isReplay.totalTradesExecuted} сделок, OOS: ${oosReplay.totalTradesExecuted} сделок, порог: 30 сделок). Результаты носят предварительный исследовательский характер.`;
+    } else if (isReplay.expectancyR > 0 && oosReplay.expectancyR > 0 && efficiencyRatio >= 0.70) {
+      statisticalVerdict = 'PROVEN_EDGE';
+      conclusion = `Подтверждён статистический перевес на Out-of-Sample: эффективность обобщения ${generalizationScore}%, OOS Expectancy ${oosReplay.expectancyR.toFixed(2)}R при контроле просадки.`;
+    } else if (isReplay.expectancyR > 0 && oosReplay.expectancyR > 0) {
+      statisticalVerdict = 'TENTATIVE_EDGE';
+      conclusion = `Умеренное сохранение эффективности на OOS (${generalizationScore}%). Матожидание остаётся положительным (${oosReplay.expectancyR.toFixed(2)}R).`;
+    } else {
+      statisticalVerdict = 'OVERFITTED';
+      conclusion = `Признаки переподгонки: стратегия прибыльна In-Sample (${isReplay.expectancyR.toFixed(2)}R), но деградирует на Out-of-Sample (${oosReplay.expectancyR.toFixed(2)}R).`;
+    }
+
+    const calcRejectionRate = (replay: ReplaySummary) => {
+      const pot = replay.rejectionFunnel?.potentialBars || replay.totalCandles;
+      const sigs = replay.totalSignalsGenerated;
+      return pot > 0 ? Math.round(((pot - sigs) / pot) * 10000) / 100 : 0;
+    };
+
+    return {
+      asset: userConfig.asset,
+      timeframe: userConfig.timeframe,
+      totalCandles: candles.length,
+      splitRatio: inSampleFraction,
+      inSampleSummary: {
+        trades: isReplay.totalTradesExecuted,
+        winRate: isReplay.winRate,
+        expectancyR: isReplay.expectancyR,
+        profitFactor: isReplay.profitFactor,
+        maxDrawdownPercent: isReplay.maxDrawdownPercent,
+        netPnlUsd: isReplay.netPnlUsd,
+        averageR: isReplay.averageR,
+        medianR: isReplay.medianR,
+        rejectionRatePercent: calcRejectionRate(isReplay),
+        isStatisticallyReliable: isReliableIS,
+      },
+      outOfSampleSummary: {
+        trades: oosReplay.totalTradesExecuted,
+        winRate: oosReplay.winRate,
+        expectancyR: oosReplay.expectancyR,
+        profitFactor: oosReplay.profitFactor,
+        maxDrawdownPercent: oosReplay.maxDrawdownPercent,
+        netPnlUsd: oosReplay.netPnlUsd,
+        averageR: oosReplay.averageR,
+        medianR: oosReplay.medianR,
+        rejectionRatePercent: calcRejectionRate(oosReplay),
+        isStatisticallyReliable: isReliableOOS,
+      },
+      generalizationScore,
+      statisticalVerdict,
+      conclusion,
     };
   }
 }

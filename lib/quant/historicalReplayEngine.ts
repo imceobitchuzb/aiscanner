@@ -26,6 +26,16 @@ export interface ReplayConfig {
   endDate?: number;
   ablation?: FilterAblationConfig;
   useAdaptiveEngine?: boolean;
+  partialExit?: PartialExitConfig;
+}
+
+export interface PartialExitConfig {
+  enabled?: boolean;
+  tp1Percent?: number; // default 50
+  tp2Percent?: number; // default 30
+  tp3Percent?: number; // default 20
+  moveSlToBreakevenAtTp1?: boolean; // default true
+  trailRemainingAfterTp1?: boolean; // default true
 }
 
 export type TradeOutcome = 'WIN' | 'LOSS' | 'TIMEOUT' | 'INVALIDATED';
@@ -58,6 +68,12 @@ export interface ReplayedTrade {
   pnlPercent: number;
   mfePercent: number;
   maePercent: number;
+  partialFills?: {
+    step: 'TP1' | 'TP2' | 'TP3' | 'SL' | 'TIMEOUT';
+    units: number;
+    price: number;
+    pnlUsd: number;
+  }[];
   durationBars: number;
   durationSeconds: number;
   regimeAtEntry: string;
@@ -164,6 +180,13 @@ export class HistoricalReplayEngine {
       endDate: userConfig.endDate ?? (candles.length > 0 ? candles[candles.length - 1].time : 0),
       ablation: userConfig.ablation ?? {},
       useAdaptiveEngine: userConfig.useAdaptiveEngine ?? false,
+      partialExit: userConfig.partialExit ?? {
+        enabled: true,
+        tp1Percent: 50,
+        tp2Percent: 30,
+        moveSlToBreakevenAtTp1: true,
+        trailRemainingAfterTp1: true,
+      },
     };
 
     // 1. Audit and clean dataset
@@ -205,9 +228,19 @@ export class HistoricalReplayEngine {
       stopLoss: number;
       takeProfit1: number;
       takeProfit2: number;
+      takeProfit3?: number;
       riskRewardRatio: number;
       initialRiskPerUnit: number;
       units: number;
+      totalUnits: number;
+      remainingUnits: number;
+      tp1Executed: boolean;
+      tp2Executed: boolean;
+      tp3Executed: boolean;
+      realizedPartialPnlUsd: number;
+      realizedFeesUsd: number;
+      realizedSlippageUsd: number;
+      partialFills: { step: 'TP1' | 'TP2' | 'TP3' | 'SL' | 'TIMEOUT'; units: number; price: number; pnlUsd: number }[];
       regime: string;
       confidence: number;
       quality: number;
@@ -310,110 +343,258 @@ export class HistoricalReplayEngine {
           }
         }
 
+        const isPartialScaleOut = config.useAdaptiveEngine && (config.partialExit?.enabled !== false);
+        const tp1Pct = config.partialExit?.tp1Percent ?? 50;
+        const tp2Pct = config.partialExit?.tp2Percent ?? 30;
+        const slippageRate = config.slippageBps / 10000;
+        const feeRate = config.feesBps / 10000;
+
         // Check SL and TP hits
         if (isLong) {
           const slHit = currentBar.low <= activeTrade.stopLoss;
-          const tp2Hit = currentBar.high >= activeTrade.takeProfit2;
-          const tp1Hit = currentBar.high >= activeTrade.takeProfit1;
+          const tp1Hit = !activeTrade.tp1Executed && currentBar.high >= activeTrade.takeProfit1;
+          const tp2Hit = activeTrade.tp1Executed && !activeTrade.tp2Executed && currentBar.high >= activeTrade.takeProfit2;
+          const tp3Hit = (activeTrade.tp2Executed || activeTrade.tp1Executed) && currentBar.high >= (activeTrade.takeProfit3 || activeTrade.takeProfit2 * 1.01);
 
-          if (slHit && tp1Hit) {
-            // SL / TP Collision in the same bar
+          if (!activeTrade.tp1Executed && slHit && tp1Hit) {
+            // SL / TP Collision in the same bar prior to any partial fill
             if (config.collisionRule === 'SL_FIRST') {
               isClosed = true;
               exitPrice = activeTrade.stopLoss;
               exitReason = 'COLLISION_SL';
               outcome = 'LOSS';
             } else {
-              isClosed = true;
-              exitPrice = activeTrade.takeProfit1;
-              exitReason = 'TP1_HIT';
-              outcome = 'WIN';
+              if (isPartialScaleOut) {
+                const closeUnits = Math.min(activeTrade.remainingUnits, Math.round(activeTrade.totalUnits * (tp1Pct / 100) * 10000) / 10000);
+                const pExit = activeTrade.takeProfit1 * (1 - slippageRate);
+                const pGross = (pExit - activeTrade.entryPrice) * closeUnits;
+                const pFee = (closeUnits * activeTrade.entryPrice + closeUnits * pExit) * feeRate;
+                const pSlip = (closeUnits * activeTrade.entryPrice + closeUnits * pExit) * slippageRate;
+                activeTrade.realizedPartialPnlUsd += (pGross - pFee);
+                activeTrade.realizedFeesUsd += pFee;
+                activeTrade.realizedSlippageUsd += pSlip;
+                activeTrade.remainingUnits = Math.max(0, activeTrade.remainingUnits - closeUnits);
+                activeTrade.tp1Executed = true;
+                activeTrade.partialFills.push({ step: 'TP1', units: closeUnits, price: pExit, pnlUsd: pGross - pFee });
+                activeTrade.stopLoss = Math.max(activeTrade.stopLoss, activeTrade.entryPrice);
+                activeTrade.isBreakevenTriggered = true;
+              } else {
+                isClosed = true;
+                exitPrice = activeTrade.takeProfit1;
+                exitReason = 'TP1_HIT';
+                outcome = 'WIN';
+              }
             }
           } else if (slHit) {
             isClosed = true;
             exitPrice = activeTrade.stopLoss;
             exitReason = 'SL_HIT';
             outcome = 'LOSS';
-          } else if (tp2Hit) {
-            isClosed = true;
-            exitPrice = activeTrade.takeProfit2;
-            exitReason = 'TP2_HIT';
-            outcome = 'WIN';
-          } else if (tp1Hit) {
-            isClosed = true;
-            exitPrice = activeTrade.takeProfit1;
-            exitReason = 'TP1_HIT';
-            outcome = 'WIN';
-          } else if (durationBars >= config.maxHoldingBars) {
-            isClosed = true;
-            exitPrice = currentBar.close;
-            exitReason = 'TIMEOUT';
-            outcome = exitPrice > activeTrade.entryPrice ? 'WIN' : 'TIMEOUT';
+          } else if (isPartialScaleOut) {
+            if (tp1Hit) {
+              const closeUnits = Math.min(activeTrade.remainingUnits, Math.round(activeTrade.totalUnits * (tp1Pct / 100) * 10000) / 10000);
+              const pExit = activeTrade.takeProfit1 * (1 - slippageRate);
+              const pGross = (pExit - activeTrade.entryPrice) * closeUnits;
+              const pFee = (closeUnits * activeTrade.entryPrice + closeUnits * pExit) * feeRate;
+              const pSlip = (closeUnits * activeTrade.entryPrice + closeUnits * pExit) * slippageRate;
+              activeTrade.realizedPartialPnlUsd += (pGross - pFee);
+              activeTrade.realizedFeesUsd += pFee;
+              activeTrade.realizedSlippageUsd += pSlip;
+              activeTrade.remainingUnits = Math.max(0, activeTrade.remainingUnits - closeUnits);
+              activeTrade.tp1Executed = true;
+              activeTrade.partialFills.push({ step: 'TP1', units: closeUnits, price: pExit, pnlUsd: pGross - pFee });
+              if (config.partialExit?.moveSlToBreakevenAtTp1 !== false) {
+                activeTrade.stopLoss = Math.max(activeTrade.stopLoss, activeTrade.entryPrice);
+                activeTrade.isBreakevenTriggered = true;
+              }
+            } else if (tp2Hit) {
+              const closeUnits = Math.min(activeTrade.remainingUnits, Math.round(activeTrade.totalUnits * (tp2Pct / 100) * 10000) / 10000);
+              const pExit = activeTrade.takeProfit2 * (1 - slippageRate);
+              const pGross = (pExit - activeTrade.entryPrice) * closeUnits;
+              const pFee = (closeUnits * activeTrade.entryPrice + closeUnits * pExit) * feeRate;
+              const pSlip = (closeUnits * activeTrade.entryPrice + closeUnits * pExit) * slippageRate;
+              activeTrade.realizedPartialPnlUsd += (pGross - pFee);
+              activeTrade.realizedFeesUsd += pFee;
+              activeTrade.realizedSlippageUsd += pSlip;
+              activeTrade.remainingUnits = Math.max(0, activeTrade.remainingUnits - closeUnits);
+              activeTrade.tp2Executed = true;
+              activeTrade.partialFills.push({ step: 'TP2', units: closeUnits, price: pExit, pnlUsd: pGross - pFee });
+              if (config.partialExit?.trailRemainingAfterTp1 !== false) {
+                activeTrade.stopLoss = Math.max(activeTrade.stopLoss, activeTrade.takeProfit1);
+              }
+            } else if (tp3Hit) {
+              isClosed = true;
+              exitPrice = activeTrade.takeProfit3 || activeTrade.takeProfit2;
+              exitReason = 'TP2_HIT';
+              outcome = 'WIN';
+            } else if (durationBars >= config.maxHoldingBars) {
+              isClosed = true;
+              exitPrice = currentBar.close;
+              exitReason = 'TIMEOUT';
+              outcome = exitPrice > activeTrade.entryPrice ? 'WIN' : 'TIMEOUT';
+            }
+          } else {
+            // Standard static single-exit logic
+            if (currentBar.high >= activeTrade.takeProfit2) {
+              isClosed = true;
+              exitPrice = activeTrade.takeProfit2;
+              exitReason = 'TP2_HIT';
+              outcome = 'WIN';
+            } else if (currentBar.high >= activeTrade.takeProfit1) {
+              isClosed = true;
+              exitPrice = activeTrade.takeProfit1;
+              exitReason = 'TP1_HIT';
+              outcome = 'WIN';
+            } else if (durationBars >= config.maxHoldingBars) {
+              isClosed = true;
+              exitPrice = currentBar.close;
+              exitReason = 'TIMEOUT';
+              outcome = exitPrice > activeTrade.entryPrice ? 'WIN' : 'TIMEOUT';
+            }
           }
         } else {
           // SHORT
           const slHit = currentBar.high >= activeTrade.stopLoss;
-          const tp2Hit = currentBar.low <= activeTrade.takeProfit2;
-          const tp1Hit = currentBar.low <= activeTrade.takeProfit1;
+          const tp1Hit = !activeTrade.tp1Executed && currentBar.low <= activeTrade.takeProfit1;
+          const tp2Hit = activeTrade.tp1Executed && !activeTrade.tp2Executed && currentBar.low <= activeTrade.takeProfit2;
+          const tp3Hit = (activeTrade.tp2Executed || activeTrade.tp1Executed) && currentBar.low <= (activeTrade.takeProfit3 || activeTrade.takeProfit2 * 0.99);
 
-          if (slHit && tp1Hit) {
+          if (!activeTrade.tp1Executed && slHit && tp1Hit) {
             if (config.collisionRule === 'SL_FIRST') {
               isClosed = true;
               exitPrice = activeTrade.stopLoss;
               exitReason = 'COLLISION_SL';
               outcome = 'LOSS';
             } else {
-              isClosed = true;
-              exitPrice = activeTrade.takeProfit1;
-              exitReason = 'TP1_HIT';
-              outcome = 'WIN';
+              if (isPartialScaleOut) {
+                const closeUnits = Math.min(activeTrade.remainingUnits, Math.round(activeTrade.totalUnits * (tp1Pct / 100) * 10000) / 10000);
+                const pExit = activeTrade.takeProfit1 * (1 + slippageRate);
+                const pGross = (activeTrade.entryPrice - pExit) * closeUnits;
+                const pFee = (closeUnits * activeTrade.entryPrice + closeUnits * pExit) * feeRate;
+                const pSlip = (closeUnits * activeTrade.entryPrice + closeUnits * pExit) * slippageRate;
+                activeTrade.realizedPartialPnlUsd += (pGross - pFee);
+                activeTrade.realizedFeesUsd += pFee;
+                activeTrade.realizedSlippageUsd += pSlip;
+                activeTrade.remainingUnits = Math.max(0, activeTrade.remainingUnits - closeUnits);
+                activeTrade.tp1Executed = true;
+                activeTrade.partialFills.push({ step: 'TP1', units: closeUnits, price: pExit, pnlUsd: pGross - pFee });
+                activeTrade.stopLoss = Math.min(activeTrade.stopLoss, activeTrade.entryPrice);
+                activeTrade.isBreakevenTriggered = true;
+              } else {
+                isClosed = true;
+                exitPrice = activeTrade.takeProfit1;
+                exitReason = 'TP1_HIT';
+                outcome = 'WIN';
+              }
             }
           } else if (slHit) {
             isClosed = true;
             exitPrice = activeTrade.stopLoss;
             exitReason = 'SL_HIT';
             outcome = 'LOSS';
-          } else if (tp2Hit) {
-            isClosed = true;
-            exitPrice = activeTrade.takeProfit2;
-            exitReason = 'TP2_HIT';
-            outcome = 'WIN';
-          } else if (tp1Hit) {
-            isClosed = true;
-            exitPrice = activeTrade.takeProfit1;
-            exitReason = 'TP1_HIT';
-            outcome = 'WIN';
-          } else if (durationBars >= config.maxHoldingBars) {
-            isClosed = true;
-            exitPrice = currentBar.close;
-            exitReason = 'TIMEOUT';
-            outcome = exitPrice < activeTrade.entryPrice ? 'WIN' : 'TIMEOUT';
+          } else if (isPartialScaleOut) {
+            if (tp1Hit) {
+              const closeUnits = Math.min(activeTrade.remainingUnits, Math.round(activeTrade.totalUnits * (tp1Pct / 100) * 10000) / 10000);
+              const pExit = activeTrade.takeProfit1 * (1 + slippageRate);
+              const pGross = (activeTrade.entryPrice - pExit) * closeUnits;
+              const pFee = (closeUnits * activeTrade.entryPrice + closeUnits * pExit) * feeRate;
+              const pSlip = (closeUnits * activeTrade.entryPrice + closeUnits * pExit) * slippageRate;
+              activeTrade.realizedPartialPnlUsd += (pGross - pFee);
+              activeTrade.realizedFeesUsd += pFee;
+              activeTrade.realizedSlippageUsd += pSlip;
+              activeTrade.remainingUnits = Math.max(0, activeTrade.remainingUnits - closeUnits);
+              activeTrade.tp1Executed = true;
+              activeTrade.partialFills.push({ step: 'TP1', units: closeUnits, price: pExit, pnlUsd: pGross - pFee });
+              if (config.partialExit?.moveSlToBreakevenAtTp1 !== false) {
+                activeTrade.stopLoss = Math.min(activeTrade.stopLoss, activeTrade.entryPrice);
+                activeTrade.isBreakevenTriggered = true;
+              }
+            } else if (tp2Hit) {
+              const closeUnits = Math.min(activeTrade.remainingUnits, Math.round(activeTrade.totalUnits * (tp2Pct / 100) * 10000) / 10000);
+              const pExit = activeTrade.takeProfit2 * (1 + slippageRate);
+              const pGross = (activeTrade.entryPrice - pExit) * closeUnits;
+              const pFee = (closeUnits * activeTrade.entryPrice + closeUnits * pExit) * feeRate;
+              const pSlip = (closeUnits * activeTrade.entryPrice + closeUnits * pExit) * slippageRate;
+              activeTrade.realizedPartialPnlUsd += (pGross - pFee);
+              activeTrade.realizedFeesUsd += pFee;
+              activeTrade.realizedSlippageUsd += pSlip;
+              activeTrade.remainingUnits = Math.max(0, activeTrade.remainingUnits - closeUnits);
+              activeTrade.tp2Executed = true;
+              activeTrade.partialFills.push({ step: 'TP2', units: closeUnits, price: pExit, pnlUsd: pGross - pFee });
+              if (config.partialExit?.trailRemainingAfterTp1 !== false) {
+                activeTrade.stopLoss = Math.min(activeTrade.stopLoss, activeTrade.takeProfit1);
+              }
+            } else if (tp3Hit) {
+              isClosed = true;
+              exitPrice = activeTrade.takeProfit3 || activeTrade.takeProfit2;
+              exitReason = 'TP2_HIT';
+              outcome = 'WIN';
+            } else if (durationBars >= config.maxHoldingBars) {
+              isClosed = true;
+              exitPrice = currentBar.close;
+              exitReason = 'TIMEOUT';
+              outcome = exitPrice < activeTrade.entryPrice ? 'WIN' : 'TIMEOUT';
+            }
+          } else {
+            // Standard static single-exit logic
+            if (currentBar.low <= activeTrade.takeProfit2) {
+              isClosed = true;
+              exitPrice = activeTrade.takeProfit2;
+              exitReason = 'TP2_HIT';
+              outcome = 'WIN';
+            } else if (currentBar.low <= activeTrade.takeProfit1) {
+              isClosed = true;
+              exitPrice = activeTrade.takeProfit1;
+              exitReason = 'TP1_HIT';
+              outcome = 'WIN';
+            } else if (durationBars >= config.maxHoldingBars) {
+              isClosed = true;
+              exitPrice = currentBar.close;
+              exitReason = 'TIMEOUT';
+              outcome = exitPrice < activeTrade.entryPrice ? 'WIN' : 'TIMEOUT';
+            }
           }
         }
 
         if (isClosed) {
-          // Apply slippage to exit
-          const slippageRate = config.slippageBps / 10000;
-          const feeRate = config.feesBps / 10000;
-
           const adjustedExitPrice = isLong
             ? exitPrice * (1 - slippageRate)
             : exitPrice * (1 + slippageRate);
 
-          const rawGainPerUnit = isLong
-            ? adjustedExitPrice - activeTrade.entryPrice
-            : activeTrade.entryPrice - adjustedExitPrice;
+          const unitsToClose = activeTrade.remainingUnits;
+          const remGrossPnlUsd = isLong
+            ? (adjustedExitPrice - activeTrade.entryPrice) * unitsToClose
+            : (activeTrade.entryPrice - adjustedExitPrice) * unitsToClose;
+
+          const remFeesUsd = (unitsToClose * activeTrade.entryPrice + unitsToClose * adjustedExitPrice) * feeRate;
+          const remSlippageUsd = (unitsToClose * activeTrade.entryPrice + unitsToClose * adjustedExitPrice) * slippageRate;
+
+          const grossPnlUsd = Math.round((remGrossPnlUsd + activeTrade.realizedPartialPnlUsd) * 100) / 100;
+          const netPnlUsd = Math.round((remGrossPnlUsd - remFeesUsd + activeTrade.realizedPartialPnlUsd) * 100) / 100;
+          const totalFeesUsd = Math.round((activeTrade.realizedFeesUsd + remFeesUsd) * 100) / 100;
+          const totalSlippageUsd = Math.round((activeTrade.realizedSlippageUsd + remSlippageUsd) * 100) / 100;
+          const notionalEntry = activeTrade.totalUnits * activeTrade.entryPrice;
+
+          if (unitsToClose > 0) {
+            activeTrade.partialFills.push({
+              step: exitReason === 'SL_HIT' ? 'SL' : exitReason === 'TIMEOUT' ? 'TIMEOUT' : 'TP3',
+              units: unitsToClose,
+              price: adjustedExitPrice,
+              pnlUsd: remGrossPnlUsd - remFeesUsd,
+            });
+          }
 
           const rMultiple = activeTrade.initialRiskPerUnit > 0
-            ? Math.round((rawGainPerUnit / activeTrade.initialRiskPerUnit) * 100) / 100
+            ? Math.round((netPnlUsd / (activeTrade.totalUnits * activeTrade.initialRiskPerUnit)) * 100) / 100
             : 0;
 
-          const notionalEntry = activeTrade.units * activeTrade.entryPrice;
-          const notionalExit = activeTrade.units * adjustedExitPrice;
-          const feesUsd = (notionalEntry + notionalExit) * feeRate;
-          const slippageUsd = (notionalEntry + notionalExit) * slippageRate;
-          const grossPnlUsd = rawGainPerUnit * activeTrade.units;
-          const netPnlUsd = grossPnlUsd - feesUsd;
+          if (netPnlUsd > 0) {
+            outcome = 'WIN';
+          } else if (exitReason === 'TIMEOUT' && netPnlUsd <= 0) {
+            outcome = 'TIMEOUT';
+          } else {
+            outcome = 'LOSS';
+          }
 
           currentEquity += netPnlUsd;
           if (currentEquity > peakEquity) {
@@ -423,11 +604,6 @@ export class HistoricalReplayEngine {
           const currentDdPct = peakEquity > 0 ? (currentDdUsd / peakEquity) * 100 : 0;
           if (currentDdUsd > maxDrawdownUsd) maxDrawdownUsd = currentDdUsd;
           if (currentDdPct > maxDrawdownPercent) maxDrawdownPercent = currentDdPct;
-
-          // If stop loss trailed into profit or exited at breakeven with positive gain, classify outcome as WIN
-          if (outcome === 'LOSS' && rMultiple > 0.05 && netPnlUsd > 0) {
-            outcome = 'WIN';
-          }
 
           const completedTrade: ReplayedTrade = {
             tradeId: activeTrade.tradeId,
@@ -452,9 +628,9 @@ export class HistoricalReplayEngine {
             units: activeTrade.units,
             grossPnlUsd: Math.round(grossPnlUsd * 100) / 100,
             netPnlUsd: Math.round(netPnlUsd * 100) / 100,
-            feesUsd: Math.round(feesUsd * 100) / 100,
-            slippageUsd: Math.round(slippageUsd * 100) / 100,
-            pnlPercent: Math.round((netPnlUsd / notionalEntry) * 10000) / 100,
+            feesUsd: totalFeesUsd,
+            slippageUsd: totalSlippageUsd,
+            pnlPercent: notionalEntry > 0 ? Math.round((netPnlUsd / notionalEntry) * 10000) / 100 : 0,
             mfePercent: Math.round(activeTrade.mfe * 100) / 100,
             maePercent: Math.round(activeTrade.mae * 100) / 100,
             durationBars,
@@ -466,6 +642,7 @@ export class HistoricalReplayEngine {
             invalidationPrice: activeTrade.invalidationPrice,
             invalidationReason: activeTrade.invalidationReason,
             funnelStage: activeTrade.funnelStage,
+            partialFills: activeTrade.partialFills,
           };
 
           // Record trade outcome in quality bucket
@@ -537,9 +714,19 @@ export class HistoricalReplayEngine {
           stopLoss: plan.stopLoss,
           takeProfit1: plan.takeProfit1,
           takeProfit2: plan.takeProfit2,
+          takeProfit3: dynamicPlan?.takeProfit3 || (plan.takeProfit2 ? plan.takeProfit2 * 1.01 : 0),
           riskRewardRatio: plan.riskRewardRatio,
           initialRiskPerUnit,
           units,
+          totalUnits: units,
+          remainingUnits: units,
+          tp1Executed: false,
+          tp2Executed: false,
+          tp3Executed: false,
+          realizedPartialPnlUsd: 0,
+          realizedFeesUsd: 0,
+          realizedSlippageUsd: 0,
+          partialFills: [],
           regime: pendingSignal.marketState.regime,
           confidence: pendingSignal.modelConfidence,
           quality: pendingSignal.setupQuality,
