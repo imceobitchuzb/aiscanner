@@ -62,7 +62,7 @@ export interface WinLossDiagnostic {
 export class SignalAuditTrail {
   private static auditRecords: SignalAuditRecord[] = [];
   private static tradeRecords: Map<string, SignalAuditRecord> = new Map();
-  private static readonly MAX_RECORDS = 50000;
+  private static readonly MAX_RECORDS = 1000;
 
   /**
    * Deterministically logs an institutional signal decision audit record.

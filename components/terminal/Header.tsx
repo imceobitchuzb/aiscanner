@@ -62,6 +62,7 @@ export const Header: React.FC<HeaderProps> = ({
 
   const navLinks = [
     { label: 'Терминал', href: '/app', icon: Terminal },
+    { label: 'Paper Trading', href: '/app/paper', icon: Activity },
     { label: 'Сканер', href: '/app/scanner', icon: Crosshair },
     { label: 'Радар', href: '/app/radar', icon: Radio },
     { label: 'Симуляция', href: '/app/simulation', icon: Sliders },
